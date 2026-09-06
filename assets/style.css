@@ -157,8 +157,13 @@ a {
 #log-content {
     text-align: left;
     white-space: pre-wrap;
-    max-height: 400px;
+    max-height: 65vh;
     padding: 0;
+}
+
+.logs-toolbar {
+    text-align: left;
+    margin-bottom: 4px;
 }
 
 #auto-update-log {

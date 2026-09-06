@@ -570,17 +570,27 @@ def test_analytics_external_blank_links_prevent_reverse_tabnabbing():
     assert all('rel="noopener noreferrer"' in link for link in blank_links)
 
 
-def test_log_panel_uses_one_preference_and_starts_hidden_for_new_users():
-    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
-        encoding="utf-8"
-    )
+def test_logs_tab_is_lazily_loaded_and_starts_hidden_for_new_users():
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "assets" / "charts.html").read_text(encoding="utf-8")
+    script = (root / "assets" / "script.js").read_text(encoding="utf-8")
 
-    assert script.count("$('#log').change(function ()") == 1
-    assert "localStorage.getItem('logCheckboxState')" in script
-    assert "localStorage.getItem('log-enabled') || 'false'" in script
-    assert "var isLogCheckboxChecked = savedLogPreference === 'true';" in script
-    assert "$('#log-box').toggle(isLogCheckboxChecked);" in script
-    assert "$('#auto-update-log').toggle(isLogCheckboxChecked);" in script
+    assert 'id="tab-logs"' in template
+    assert 'id="logs-panel" style="display: none;"' in template
+    assert "id=\"log\"" not in template
+    assert "var logsLoaded = false;" in script
+
+    switch_tab = script.split("function switchDashboardTab", 1)[1].split(
+        "\nvar startDate", 1
+    )[0]
+    assert "$('#logs-panel').toggle(isLogs);" in switch_tab
+    assert "if (isLogs && !logsLoaded) startLogPolling();" in switch_tab
+
+    start_polling = script.split("function startLogPolling()", 1)[1].split(
+        "\nfunction showAnalyticsLoadError", 1
+    )[0]
+    assert "if (logsLoaded) return;" in start_polling
+    assert "logsLoaded = true;" in start_polling
 
 
 def test_log_polling_retries_after_transient_rollover_failure():
@@ -588,13 +598,13 @@ def test_log_polling_retries_after_transient_rollover_failure():
         Path(__file__).resolve().parents[1] / "assets" / "script.js"
     ).read_text(encoding="utf-8")
     get_log = script.split("function getLog()", 1)[1].split(
-        "// Retrieve the saved header visibility", 1
+        "\nfunction startLogPolling", 1
     )[0]
     retry = get_log.split(".always(function ()", 1)[1]
 
     assert ".done(function (data, _status, xhr)" in get_log
     assert "setTimeout(getLog, logPollInterval);" in retry
-    assert "autoUpdateLog && isLogCheckboxChecked" in retry
+    assert "autoUpdateLog" in retry
 
 
 def test_dark_theme_keeps_config_panel_headings_readable():

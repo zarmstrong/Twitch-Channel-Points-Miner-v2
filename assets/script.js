@@ -112,7 +112,47 @@ var analyticsDeleteInProgress = false;
 var pointsLoaded = false;
 var dropsLoaded = false;
 var configLoaded = false;
+var logsLoaded = false;
 var webConfigState = null;
+
+// Variable to keep track of whether auto-update log is active
+var autoUpdateLog = true;
+
+// Variable to keep track of the last received log index
+var lastReceivedLogIndex = 0;
+var initialLogTailBytes = 128 * 1024;
+
+// Load a recent tail first, then request only entries appended after it.
+// Lazily started the first time the Logs tab is opened, then keeps polling
+// in the background (like the Drops/Now Watching refreshes) until paused.
+function getLog() {
+    $.get(`/log?lastIndex=${lastReceivedLogIndex}&tailBytes=${initialLogTailBytes}`).done(function (data, _status, xhr) {
+        // Process and display the new log entries received
+        // Logs contain Twitch-controlled text (for example prediction
+        // titles), so never interpret them as HTML.
+        $("#log-content").append(document.createTextNode(data));
+        // Scroll to the bottom of the log content
+        $("#log-content").scrollTop($("#log-content")[0].scrollHeight);
+
+        // Update the last received log index
+        const nextPosition = Number(xhr.getResponseHeader("X-Log-Position"));
+        if (Number.isSafeInteger(nextPosition) && nextPosition >= 0) {
+            lastReceivedLogIndex = nextPosition;
+        }
+    }).always(function () {
+        // A rollover can briefly replace the active log between polls.
+        // Retry transient failures without advancing the byte position.
+        if (autoUpdateLog) {
+            setTimeout(getLog, logPollInterval);
+        }
+    });
+}
+
+function startLogPolling() {
+    if (logsLoaded) return;
+    logsLoaded = true;
+    getLog();
+}
 
 function showAnalyticsLoadError(message, details) {
     console.error(`[analytics] ${message}`, details || '');
@@ -129,17 +169,21 @@ function switchDashboardTab(tabName) {
     var isPoints = tabName === 'points';
     var isDrops = tabName === 'drops';
     var isConfig = tabName === 'config';
+    var isLogs = tabName === 'logs';
     $('#points-panel').toggle(isPoints);
     $('#drops-panel').toggle(isDrops);
     $('#config-panel').toggle(isConfig);
+    $('#logs-panel').toggle(isLogs);
 
     $('#tab-points').toggleClass('is-link', isPoints);
     $('#tab-drops').toggleClass('is-link', isDrops);
     $('#tab-config').toggleClass('is-link', isConfig);
+    $('#tab-logs').toggleClass('is-link', isLogs);
 
     localStorage.setItem('dashboardTab', tabName);
 
     if (isConfig && !configLoaded) loadWebConfig();
+    if (isLogs && !logsLoaded) startLogPolling();
 
     // ApexCharts cannot reliably place annotations while its panel is hidden.
     // Reapply them after Points becomes visible, including when the page was
@@ -169,25 +213,6 @@ $(document).ready(function () {
     dropsFilter = localStorage.getItem('dropsFilter') || 'active';
     $('#drops-filter').val(dropsFilter);
 
-    // Keep one preference for both the checkbox and panel. New users start with
-    // the log hidden; retain the old key only as a one-time migration path.
-    var savedLogPreference = localStorage.getItem('logCheckboxState');
-    if (savedLogPreference === null) {
-        savedLogPreference = localStorage.getItem('log-enabled') || 'false';
-        localStorage.setItem('logCheckboxState', savedLogPreference);
-    }
-    var isLogCheckboxChecked = savedLogPreference === 'true';
-    $('#log').prop('checked', isLogCheckboxChecked);
-    $('#log-box').toggle(isLogCheckboxChecked);
-    $('#auto-update-log').toggle(isLogCheckboxChecked);
-
-    // Variable to keep track of whether auto-update log is active
-    var autoUpdateLog = true;
-
-    // Variable to keep track of the last received log index
-    var lastReceivedLogIndex = 0;
-    var initialLogTailBytes = 128 * 1024;
-
     $('#auto-update-log').click(() => {
         autoUpdateLog = !autoUpdateLog;
         $('#auto-update-log').text(autoUpdateLog ? '⏸️' : '▶️');
@@ -196,48 +221,6 @@ $(document).ready(function () {
             getLog();
         }
     });
-
-    $('#log').change(function () {
-        isLogCheckboxChecked = $(this).prop('checked');
-        localStorage.setItem('logCheckboxState', isLogCheckboxChecked);
-        $('#log-box').toggle(isLogCheckboxChecked);
-        $('#auto-update-log').toggle(isLogCheckboxChecked);
-
-        if (isLogCheckboxChecked) {
-            getLog();
-            $('html, body').scrollTop($(document).height());
-        }
-    });
-
-    if (isLogCheckboxChecked) {
-        getLog();
-    }
-
-    // Load a recent tail first, then request only entries appended after it.
-    function getLog() {
-        if (isLogCheckboxChecked) {
-            $.get(`/log?lastIndex=${lastReceivedLogIndex}&tailBytes=${initialLogTailBytes}`).done(function (data, _status, xhr) {
-                // Process and display the new log entries received
-                // Logs contain Twitch-controlled text (for example prediction
-                // titles), so never interpret them as HTML.
-                $("#log-content").append(document.createTextNode(data));
-                // Scroll to the bottom of the log content
-                $("#log-content").scrollTop($("#log-content")[0].scrollHeight);
-
-                // Update the last received log index
-                const nextPosition = Number(xhr.getResponseHeader("X-Log-Position"));
-                if (Number.isSafeInteger(nextPosition) && nextPosition >= 0) {
-                    lastReceivedLogIndex = nextPosition;
-                }
-            }).always(function () {
-                // A rollover can briefly replace the active log between polls.
-                // Retry transient failures without advancing the byte position.
-                if (autoUpdateLog && isLogCheckboxChecked) {
-                    setTimeout(getLog, logPollInterval);
-                }
-            });
-        }
-    }
 
     // Retrieve the saved header visibility preference from localStorage
     var headerVisibility = localStorage.getItem('headerVisibility');

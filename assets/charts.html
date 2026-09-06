@@ -92,14 +92,10 @@
                     <button id="tab-points" class="button is-small is-link" type="button" onclick="switchDashboardTab('points')">Points</button>
                     <button id="tab-drops" class="button is-small" type="button" onclick="switchDashboardTab('drops')">Drops</button>
                     <button id="tab-config" class="button is-small" type="button" onclick="switchDashboardTab('config')">Config</button>
+                    <button id="tab-logs" class="button is-small" type="button" onclick="switchDashboardTab('logs')">Logs</button>
                 </div>
             </div>
             <div class="column has-text-right top-controls" style="margin: auto">
-                <button id="auto-update-log">⏸️</button>
-                <label class="checkbox checkbox-label">
-                    Log
-                    <input type="checkbox" id="log">
-                </label>
                 <label class="checkbox checkbox-label">
                     Annotations
                     <input type="checkbox" checked="true" id="annotations">
@@ -334,10 +330,16 @@
             </div>
             <p class="config-reload-note">Dashboard changes are written directly to <code>config.py</code>. Streamer additions/removals and category list changes reload automatically; other settings take effect after restart.</p>
         </div>
-        <div class="columns">
-            <div class="column is-12">
-                <div class="box" id="log-box" style="padding: 0.30rem; display: none;">
-                    <pre id="log-content">In your run.py file set save=True in logger_settings to save logs to a file.&#10;&#13;</pre>
+
+        <div id="logs-panel" style="display: none;">
+            <div class="columns">
+                <div class="column is-12">
+                    <div class="box" id="log-box" style="padding: 0.30rem;">
+                        <div class="logs-toolbar">
+                            <button id="auto-update-log" type="button" title="Pause/resume log auto-update">⏸️</button>
+                        </div>
+                        <pre id="log-content">In your run.py file set save=True in logger_settings to save logs to a file.&#10;&#13;</pre>
+                    </div>
                 </div>
             </div>
         </div>
