@@ -593,6 +593,19 @@ def test_logs_tab_is_lazily_loaded_and_starts_hidden_for_new_users():
     assert "logsLoaded = true;" in start_polling
 
 
+def test_url_hash_overrides_saved_dashboard_tab():
+    script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
+        encoding="utf-8"
+    )
+    ready_fn = script.split("$(document).ready(function ()", 1)[1].split(
+        "$('#auto-update-log').click", 1
+    )[0]
+
+    assert "window.location.hash" in ready_fn
+    assert "['points', 'drops', 'config', 'logs'].includes(requestedTab)" in ready_fn
+    assert "savedDashboardTab = requestedTab;" in ready_fn
+
+
 def test_log_polling_retries_after_transient_rollover_failure():
     script = (
         Path(__file__).resolve().parents[1] / "assets" / "script.js"

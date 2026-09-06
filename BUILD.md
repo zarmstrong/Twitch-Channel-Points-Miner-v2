@@ -12,10 +12,12 @@ repository root.
 - The project dependencies
 - [PyInstaller 6.21.0](https://pyinstaller.org/)
 
-Install the build dependencies:
+Install the build dependencies. `requirements-windows.txt` includes
+`requirements.txt` plus `pywebview`, which powers the executable's desktop
+window and is not needed by Docker or a plain source checkout:
 
 ```powershell
-py -m pip install -r requirements.txt
+py -m pip install -r requirements-windows.txt
 py -m pip install pyinstaller==6.21.0
 ```
 
@@ -26,9 +28,11 @@ Build the executable:
 ```
 
 The build produces `dist\TwitchChannelPointsMiner.exe`. Copy it to a writable
-directory before running it. The executable's first-launch configuration and
-upgrade behavior are documented in the [Windows section](README.md#windows) of
-the main README.
+directory before running it. Launching it opens a desktop window with a
+Dashboard tab (the analytics dashboard, embedded) and a Console tab (the
+miner's live log output, including the Twitch sign-in prompt). The
+executable's first-launch configuration and upgrade behavior are documented
+in the [Windows section](README.md#windows) of the main README.
 
 To build the per-user Windows installer after building the executable, install
 [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run:

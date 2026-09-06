@@ -56,6 +56,17 @@ begin
   Result := Value;
 end;
 
+function GeneratePassword(PasswordLength: Integer): String;
+const
+  Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+var
+  i: Integer;
+begin
+  Result := '';
+  for i := 1 to PasswordLength do
+    Result := Result + Chars[Random(Length(Chars)) + 1];
+end;
+
 function PythonStreamerList(Value: String): String;
 var
   CommaAt: Integer;
@@ -124,17 +135,42 @@ begin
     end;
   end;
 
+  // Powers the desktop shell's embedded Dashboard tab. Without this, a
+  // config.py created by the installer (rather than the exe's own first-run
+  // template copy) would start with analytics disabled and nothing for the
+  // Dashboard tab to show. Mirrors ensure_windows_analytics_defaults() in
+  // windows_launcher.py, which does the same thing for a ZIP install's
+  // first launch.
+  if Pos('''enable_analytics'': False,', ConfigText) > 0 then
+  begin
+    StringChangeEx(ConfigText, '''enable_analytics'': False,',
+      '''enable_analytics'': True,', True);
+    ConfigText := ConfigText + #13#10 +
+      '# --- Added by the installer: enables the embedded dashboard ---' + #13#10 +
+      '# Change these values (or set enable_analytics back to False) any time.' + #13#10 +
+      'ANALYTICS_CONFIG = {' + #13#10 +
+      '    ''host'': ''127.0.0.1'',' + #13#10 +
+      '    ''port'': 5000,' + #13#10 +
+      '    ''refresh'': 5,' + #13#10 +
+      '    ''days_ago'': 7,' + #13#10 +
+      '    ''password'': ''' + GeneratePassword(24) + ''',' + #13#10 +
+      '    ''log_poll_interval'': 5,' + #13#10 +
+      '}' + #13#10;
+  end;
+
   ConfigBytes := AnsiString(ConfigText);
   SaveStringToFile(ConfigPath, ConfigBytes, False);
 end;
 
 procedure InitializeWizard;
 begin
+  Randomize;
   ConfigurePage := CreateInputQueryPage(wpSelectTasks,
     'Configure the miner',
     'Optionally prefill the initial configuration',
     'These values are used only when no configuration already exists. ' +
-    'You can change every setting later in config\config.py.');
+    'You can change every setting later - either here or in the app''s ' +
+    'own Config tab, which opens automatically the first time it runs.');
   ConfigurePage.Add('Twitch username:', False);
   ConfigurePage.Add('Channels to watch (comma-separated):', False);
 end;

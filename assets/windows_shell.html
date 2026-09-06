@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Twitch Channel Points Miner</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+            background: #1e1f29;
+            color: #eee;
+        }
+
+        #shell-tabs {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            background: #14151d;
+            box-sizing: border-box;
+            height: 38px;
+        }
+
+        #shell-tabs button {
+            background: #2b2d3e;
+            color: #eee;
+            border: none;
+            padding: 6px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        #shell-tabs button.active {
+            background: #f9826c;
+            color: #1e1f29;
+            font-weight: bold;
+        }
+
+        #shell-tabs .spacer {
+            flex: 1;
+        }
+
+        #shell-open-browser {
+            background: transparent !important;
+            color: #9aa0c0 !important;
+            text-decoration: underline;
+            font-weight: normal !important;
+        }
+
+        .shell-panel {
+            position: absolute;
+            top: 38px;
+            left: 0;
+            right: 0;
+            bottom: 0;
+        }
+
+        #dashboard-panel iframe {
+            width: 100%;
+            height: 100%;
+            border: 0;
+            background: #fff;
+        }
+
+        #console-panel {
+            display: none;
+            padding: 10px;
+            box-sizing: border-box;
+            overflow: auto;
+        }
+
+        #console-content {
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 12px;
+            margin: 0;
+        }
+
+        #dashboard-message {
+            display: none;
+            padding: 24px;
+            max-width: 640px;
+            line-height: 1.5;
+        }
+
+        #dashboard-message code {
+            background: #2b2d3e;
+            padding: 1px 5px;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="shell-tabs">
+        <button id="shell-tab-dashboard" class="active" type="button">Dashboard</button>
+        <button id="shell-tab-console" type="button">Console</button>
+        <span class="spacer"></span>
+        <button id="shell-open-browser" type="button">Open in browser</button>
+    </div>
+
+    <div id="dashboard-panel" class="shell-panel">
+        <div id="dashboard-message">
+            <p>The dashboard isn't available yet.</p>
+            <p>Check the Console tab for details, or enable analytics by setting
+                <code>enable_analytics</code> to <code>True</code> in <code>MINER_CONFIG</code> and
+                configuring <code>ANALYTICS_CONFIG</code> in <code>config\config.py</code>.</p>
+        </div>
+        <iframe id="dashboard-frame" style="display: none;"></iframe>
+    </div>
+
+    <div id="console-panel" class="shell-panel">
+        <pre id="console-content"></pre>
+    </div>
+
+    <script>
+        var lastConsoleSeq = 0;
+        var dashboardRequested = false;
+
+        function switchShellTab(tab) {
+            var isDashboard = tab === 'dashboard';
+            document.getElementById('dashboard-panel').style.display = isDashboard ? 'block' : 'none';
+            document.getElementById('console-panel').style.display = isDashboard ? 'none' : 'block';
+            document.getElementById('shell-tab-dashboard').classList.toggle('active', isDashboard);
+            document.getElementById('shell-tab-console').classList.toggle('active', !isDashboard);
+        }
+
+        document.getElementById('shell-tab-dashboard').addEventListener('click', function () {
+            switchShellTab('dashboard');
+        });
+        document.getElementById('shell-tab-console').addEventListener('click', function () {
+            switchShellTab('console');
+        });
+        document.getElementById('shell-open-browser').addEventListener('click', function () {
+            if (window.pywebview) window.pywebview.api.open_in_browser();
+        });
+
+        function pollConsole() {
+            if (!window.pywebview) {
+                setTimeout(pollConsole, 300);
+                return;
+            }
+            window.pywebview.api.get_console_tail(lastConsoleSeq).then(function (result) {
+                if (result && result.lines && result.lines.length) {
+                    var content = document.getElementById('console-content');
+                    // Console output can contain arbitrary text from any log
+                    // source (including Twitch), so never treat it as HTML.
+                    result.lines.forEach(function (line) {
+                        content.appendChild(document.createTextNode(line));
+                    });
+                    content.scrollTop = content.scrollHeight;
+                    lastConsoleSeq = result.next_seq;
+                }
+            }).catch(function () {
+                // Transient bridge hiccup; the next poll will catch up.
+            }).then(function () {
+                setTimeout(pollConsole, 750);
+            });
+        }
+
+        function loadDashboard() {
+            if (dashboardRequested) return;
+            dashboardRequested = true;
+            // get_dashboard_info() briefly waits on the Python side for the
+            // analytics server (started on a background thread) to come up,
+            // so this call can take a few seconds on a fresh launch.
+            window.pywebview.api.get_dashboard_info().then(function (info) {
+                if (info && info.url) {
+                    var frame = document.getElementById('dashboard-frame');
+                    frame.src = info.url + (info.initial_tab ? '#' + info.initial_tab : '');
+                    frame.style.display = 'block';
+                } else {
+                    document.getElementById('dashboard-message').style.display = 'block';
+                }
+            }).catch(function () {
+                document.getElementById('dashboard-message').style.display = 'block';
+            });
+        }
+
+        window.addEventListener('pywebviewready', function () {
+            loadDashboard();
+            pollConsole();
+        });
+    </script>
+</body>
+
+</html>

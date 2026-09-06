@@ -1685,8 +1685,8 @@ folder private because it will contain your Twitch login and saved session.
    `Documents\TwitchChannelPointsMiner`, and select **Extract**. Do not run the
    program from inside the ZIP file.
 5. Open the extracted folder and double-click `TwitchChannelPointsMiner.exe`.
-   The first run creates the configuration file and waits for you to press Enter
-   before closing, so its instructions remain visible.
+   The first run creates the configuration file and opens a desktop window
+   directly on the **Config** tab, ready for you to fill in.
 
 Only download the executable from the project's official Releases page. If
 Microsoft Defender SmartScreen appears, check that the publisher warning names
@@ -1696,33 +1696,38 @@ delete it instead.
 
 ### Set up your account
 
-1. In the extracted folder, open the new `config` folder.
-2. Right-click `config.py`, select **Open with**, and choose **Notepad**. Keep the
-   `.py` filename; do not rename it to `.txt`.
-3. Find `your-twitch-username` and replace it with your Twitch login name.
-4. Find the `STREAMERS = [` section near the middle of the file. Replace the
-   example streamer names with the channels you want to watch. Use login names
-   from their Twitch URLs, without `https://twitch.tv/` or the `@` symbol.
-5. Review the other settings and comments in the file. In particular, remove or
-   disable example notification services that you do not use. The
-   [configuration guide](#configuration-file) explains every section and links
-   to the complete examples.
-6. In Notepad, select **File > Save**, then close Notepad.
+The desktop window has two tabs: **Dashboard** (the analytics dashboard,
+embedded) and **Console** (the miner's live log output). On first run it
+opens straight to the Dashboard tab's **Config** view.
 
-The generated file is the full configuration template. You can return to it
-later to enable followed channels, Drops categories, predictions,
-notifications, and other settings without starting over.
+1. If the window asks for a username and password, use your Twitch username
+   and the password printed on the **Console** tab (also saved in
+   `config\config.py`, under `ANALYTICS_CONFIG`).
+2. Under **Configured streamers**, add the channels you want to watch.
+3. Review the other Config tab sections - categories, sources, logging, and
+   notifications. The [configuration guide](#configuration-file) explains
+   every section in more detail; anything not covered by the Config tab can
+   still be edited directly in `config\config.py` with Notepad.
+
+Changes made in the Config tab are written to `config\config.py`
+automatically; streamer and category changes take effect immediately, and
+other settings after a restart. You can return to this tab any time to enable
+followed channels, Drops categories, predictions, notifications, and other
+settings.
 
 ### Start the miner
 
-Double-click `TwitchChannelPointsMiner.exe` again. Leave the black console window
-open while the miner is running and follow any Twitch sign-in instructions it
-shows. To stop the miner, click the console window and press `Ctrl+C`, or close
-the window.
+The miner starts automatically as soon as the desktop window opens - there is
+no separate step. Watch its progress on the **Dashboard** tab, and follow any
+Twitch sign-in instructions on the **Console** tab (this is also where
+startup errors appear if the dashboard itself fails to load). Use **Open in
+browser** on either tab to view the dashboard in your default browser
+instead.
 
-The miner saves its settings, login session, and logs in folders beside the
-executable. Do not move the executable by itself after setup; move the entire
-`TwitchChannelPointsMiner` folder if you want it in a different location.
+Closing the window stops the miner. The miner saves its settings, login
+session, and logs in folders beside the executable. Do not move the
+executable by itself after setup; move the entire `TwitchChannelPointsMiner`
+folder if you want it in a different location.
 
 ### Update the miner
 
@@ -1735,19 +1740,24 @@ executable. Do not move the executable by itself after setup; move the entire
 
 ### Windows troubleshooting
 
-- **The first-run window asks you to press Enter:** This keeps the setup
-  instructions visible. Open `config\config.py`, finish
-  [Set up your account](#set-up-your-account), and run the executable again.
+- **The desktop window never appears, or a console window flashes and
+  closes:** The executable needs the Microsoft Edge WebView2 runtime, which
+  ships with Windows 11 and most up-to-date Windows 10 installs. If it's
+  missing, install the
+  [Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+  and run the executable again.
+- **The Dashboard tab shows "The dashboard isn't available yet":** Check the
+  Console tab for the reason. Analytics may still be starting up, or
+  `enable_analytics` may be set to `False` in `config\config.py`.
 - **Windows says it cannot find the configuration:** Right-click the downloaded
   ZIP and use **Extract All...** before running the executable.
-- **Notepad saved `config.py.txt`:** In File Explorer, enable **View > Show >
-  File name extensions**, then rename the file to `config.py`.
 - **Emoji or symbols look broken:** In `config.py`, use
   `LoggerSettings(emoji=False)` in `MINER_CONFIG["logger_settings"]`. See
   [LoggerSettings](#loggersettings) for the complete example.
-- **The miner closes or reports an error after setup:** Open the `logs` folder
-  beside the executable and check the newest log file. Remove account names,
-  cookies, tokens, and passwords before sharing a log in a bug report.
+- **The miner closes or reports an error after setup:** Check the Console tab,
+  or open the `logs` folder beside the executable and check the newest log
+  file. Remove account names, cookies, tokens, and passwords before sharing a
+  log in a bug report.
 
 Developers who want to create the executable from source can use the
 [Windows build guide](BUILD.md#windows-executable).

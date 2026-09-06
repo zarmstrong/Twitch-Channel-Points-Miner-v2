@@ -210,6 +210,13 @@ $(document).ready(function () {
     $('#dark-theme').prop('disabled', savedDarkMode !== 'true');
 
     var savedDashboardTab = localStorage.getItem('dashboardTab') || 'points';
+    // A caller embedding this page (e.g. the Windows desktop shell's first-run
+    // Config view) can force the initial tab via a URL hash, bypassing
+    // whatever was last saved for this browser profile.
+    var requestedTab = (window.location.hash || '').replace('#', '');
+    if (['points', 'drops', 'config', 'logs'].includes(requestedTab)) {
+        savedDashboardTab = requestedTab;
+    }
     dropsFilter = localStorage.getItem('dropsFilter') || 'active';
     $('#drops-filter').val(dropsFilter);
 
