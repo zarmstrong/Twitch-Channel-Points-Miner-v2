@@ -267,6 +267,22 @@ def test_config_endpoints_require_analytics_authentication():
     assert "analytics username and password" in read_response.get_json()["error"]
 
 
+def test_static_assets_are_served_without_authentication():
+    # CSS/JS/images powering the UI, not account data - a browser resends
+    # cached Basic Auth credentials automatically for these, but the
+    # Windows shell's embedded iframe relies on a cookie that doesn't
+    # reliably reach same-origin sub-resource requests there, which
+    # previously left the page structure loading while every style, script,
+    # and image 401'd and silently failed to apply.
+    server = AnalyticsServer(username="user", password="secret")
+
+    response = server.app.test_client().get(
+        server.app.static_url_path + "/style.css"
+    )
+
+    assert response.status_code == 200
+
+
 def test_dashboard_shows_version_update_banner_and_footer(monkeypatch):
     monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
     monkeypatch.setattr(Settings, "latest_release_version", "3.8.0", raising=False)

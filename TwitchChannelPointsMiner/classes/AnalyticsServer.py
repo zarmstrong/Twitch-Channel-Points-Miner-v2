@@ -695,6 +695,18 @@ class AnalyticsServer(Thread):
 
         @self.app.before_request
         def require_authentication():
+            if request.endpoint == "static":
+                # CSS/JS/images powering the UI itself, not account data -
+                # gating these behind auth has no security benefit and
+                # breaks any client that can't repeat credentials on every
+                # sub-resource request. A browser resends cached HTTP Basic
+                # credentials automatically, but the Windows shell's
+                # embedded iframe relies on a cookie set by the bypass-token
+                # check below, and that cookie doesn't reliably reach these
+                # same-origin requests there - leaving the page structure to
+                # load (its own request carries the token) while every
+                # style/script/image 401s and silently fails to apply.
+                return None
             if self.password is None:
                 if request.path.startswith("/config"):
                     return Response(
