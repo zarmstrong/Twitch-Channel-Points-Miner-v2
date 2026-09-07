@@ -922,7 +922,9 @@ def test_window_api_enable_dashboard_delegates_to_shared_helper(tmp_path, monkey
 
 
 def test_open_folder_creates_missing_directory(tmp_path, monkeypatch):
-    monkeypatch.setattr(windows_launcher.os, "name", "posix")
+    # No os.startfile on this platform - only the directory-creation half of
+    # the behavior is exercised here.
+    monkeypatch.delattr(windows_launcher.os, "startfile", raising=False)
     target = tmp_path / "not-created-yet"
 
     windows_launcher._open_folder(target)
@@ -930,25 +932,22 @@ def test_open_folder_creates_missing_directory(tmp_path, monkeypatch):
     assert target.is_dir()
 
 
-def test_open_folder_launches_explorer_on_windows(tmp_path, monkeypatch):
+def test_open_folder_launches_explorer_when_available(tmp_path, monkeypatch):
+    # Gated on hasattr(os, "startfile") rather than os.name == "nt" - see
+    # _open_folder's docstring for why: flipping the real os.name is a
+    # landmine for pathlib's own Path() dispatch (raises NotImplementedError
+    # deep inside pytest's internals on some Python versions), so this
+    # never touches it.
     calls = []
-    monkeypatch.setattr(windows_launcher.os, "name", "nt")
     monkeypatch.setattr(windows_launcher.os, "startfile", calls.append, raising=False)
     target = tmp_path / "config"
 
     windows_launcher._open_folder(target)
 
-    # Checked by name rather than full equality/string form: patching
-    # os.name to "nt" also flips pathlib's own Path() dispatch to
-    # WindowsPath for the remainder of this test, which renders with
-    # backslashes - a mismatch against the original PosixPath that has
-    # nothing to do with the behavior actually under test here.
-    assert len(calls) == 1
-    assert calls[0].name == "config"
+    assert calls == [target]
 
 
 def test_open_folder_swallows_errors(tmp_path, monkeypatch):
-    monkeypatch.setattr(windows_launcher.os, "name", "nt")
     monkeypatch.setattr(
         windows_launcher.os,
         "startfile",

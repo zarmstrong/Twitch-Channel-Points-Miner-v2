@@ -536,11 +536,18 @@ def _open_folder(path):
     it doesn't exist yet (e.g. the logs folder before the miner has written
     anything). Silently does nothing if that fails - not worth surfacing an
     error dialog over.
+
+    Gated on hasattr(os, "startfile") rather than os.name == "nt": the
+    attribute genuinely only exists on a Windows CPython build, so it's
+    equivalent in production, but doesn't require flipping the real
+    (process-wide) os.name to test - which pathlib itself also reads to
+    pick Path's concrete subclass, and does not uniformly tolerate being
+    told to build the "wrong" one for the actual OS across Python versions.
     """
     try:
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
-        if os.name == "nt":
+        if hasattr(os, "startfile"):
             os.startfile(path)  # noqa: S606 - Windows-only, opens Explorer
     except OSError:
         pass
