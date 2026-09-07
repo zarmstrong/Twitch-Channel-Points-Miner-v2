@@ -23,6 +23,7 @@ from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.config_editor import (
     ConfigEditError,
+    enable_analytics_dashboard,
     load_web_overrides,
     migrate_web_config,
     read_managed_web_config,
@@ -818,6 +819,96 @@ ANALYTICS_CONFIG = None
         source.name == "FOLLOWERS"
         for source in namespace["MINER_CONFIG"]["streamer_source_priority"]
     )
+
+
+def test_enable_analytics_dashboard_preserves_formatting_and_comments(tmp_path):
+    # Used by the Windows desktop shell's one-time "enable the dashboard?"
+    # consent prompt and its on-demand "Enable dashboard" button - a
+    # deliberate, in-the-moment user action, so (unlike the shell's silent
+    # first-run bootstrap) it must go through this source-preserving path
+    # and leave the rest of the file - comments included - untouched.
+    config = tmp_path / "config.py"
+    config.write_text(
+        """\
+# my custom header comment
+MINER_CONFIG = {
+    "username": "someone",  # inline comment
+    "enable_analytics": False,
+}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+""",
+        encoding="utf-8",
+    )
+
+    enable_analytics_dashboard(config, password="generated-secret")
+
+    source = config.read_text(encoding="utf-8")
+    assert "# my custom header comment" in source
+    assert '"username": "someone",  # inline comment' in source
+
+    module = _load_config(config)
+    assert module.MINER_CONFIG["enable_analytics"] is True
+    assert module.ANALYTICS_CONFIG == {
+        "host": "127.0.0.1",
+        "port": 5000,
+        "refresh": 5,
+        "days_ago": 7,
+        "password": "generated-secret",
+        "log_poll_interval": 5,
+    }
+
+
+def test_enable_analytics_dashboard_respects_existing_analytics_config(tmp_path):
+    # A user may have pre-configured analytics settings while leaving it
+    # switched off; enabling it must not clobber those with fresh defaults
+    # and an unrelated generated password.
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    # CONFIG_VERSION matches the current schema so _load_config's own,
+    # unrelated schema migration (which legitimately backfills missing
+    # ANALYTICS_CONFIG keys like refresh/days_ago on an *old*-schema config)
+    # is a verified no-op - isolating enable_analytics_dashboard's own
+    # behavior, which is what this test is about.
+    config.write_text(
+        f"""\
+CONFIG_VERSION = {CONFIG_VERSION}
+MINER_CONFIG = {{
+    "enable_analytics": False,
+}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = {{
+    "host": "127.0.0.1",
+    "port": 9999,
+    "password": "already-set-by-user",
+}}
+""",
+        encoding="utf-8",
+    )
+
+    enable_analytics_dashboard(config, password="should-not-be-used")
+
+    module = _load_config(config)
+    assert module.MINER_CONFIG["enable_analytics"] is True
+    assert module.ANALYTICS_CONFIG == {
+        "host": "127.0.0.1",
+        "port": 9999,
+        "password": "already-set-by-user",
+    }
+
+
+def test_enable_analytics_dashboard_requires_analytics_config_assignment(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        'MINER_CONFIG = {"enable_analytics": False}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigEditError, match="ANALYTICS_CONFIG"):
+        enable_analytics_dashboard(config, password="secret")
 
 
 def test_legacy_streamers_migrate_in_one_source_rewrite(tmp_path, monkeypatch):

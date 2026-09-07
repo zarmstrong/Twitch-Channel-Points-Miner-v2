@@ -94,6 +94,35 @@
             padding: 1px 5px;
             border-radius: 3px;
         }
+
+        #analytics-disabled-panel {
+            display: none;
+            padding: 24px;
+            max-width: 640px;
+            line-height: 1.5;
+        }
+
+        #enable-dashboard-button {
+            background: #f9826c;
+            color: #1e1f29;
+            border: none;
+            padding: 8px 18px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: bold;
+            margin-top: 8px;
+        }
+
+        #enable-dashboard-button:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+
+        #enable-dashboard-status {
+            margin-top: 10px;
+            color: #9aa0c0;
+        }
     </style>
 </head>
 
@@ -106,6 +135,14 @@
     </div>
 
     <div id="dashboard-panel" class="shell-panel">
+        <div id="analytics-disabled-panel">
+            <h2>Dashboard is turned off</h2>
+            <p>Analytics is currently disabled, so there's no Points, Drops, or Config view to
+                show here. Mining still works the same either way - check the Console tab for
+                live logs and the Twitch sign-in prompt.</p>
+            <button id="enable-dashboard-button" type="button">Enable dashboard</button>
+            <p id="enable-dashboard-status"></p>
+        </div>
         <div id="dashboard-message">
             <p>The dashboard isn't available yet.</p>
             <p>Check the Console tab for details, or enable analytics by setting
@@ -139,6 +176,24 @@
         });
         document.getElementById('shell-open-browser').addEventListener('click', function () {
             if (window.pywebview) window.pywebview.api.open_in_browser();
+        });
+
+        document.getElementById('enable-dashboard-button').addEventListener('click', function () {
+            var button = document.getElementById('enable-dashboard-button');
+            var status = document.getElementById('enable-dashboard-status');
+            button.disabled = true;
+            status.textContent = '';
+            window.pywebview.api.enable_dashboard().then(function (result) {
+                // The message can include arbitrary error text (e.g. a
+                // filesystem error), so never treat it as HTML.
+                status.textContent = (result && result.message) || 'Something went wrong.';
+                if (!result || !result.success) {
+                    button.disabled = false;
+                }
+            }).catch(function () {
+                status.textContent = 'Something went wrong.';
+                button.disabled = false;
+            });
         });
 
         function pollConsole() {
@@ -175,6 +230,12 @@
                     var frame = document.getElementById('dashboard-frame');
                     frame.src = info.url + (info.initial_tab ? '#' + info.initial_tab : '');
                     frame.style.display = 'block';
+                } else if (info && info.enabled === false) {
+                    // Analytics is deliberately off (the shell knows this
+                    // directly - no need to guess from a failed connection),
+                    // so show the dedicated disabled-state panel rather than
+                    // the generic "unavailable" fallback below.
+                    document.getElementById('analytics-disabled-panel').style.display = 'block';
                 } else {
                     document.getElementById('dashboard-message').style.display = 'block';
                 }

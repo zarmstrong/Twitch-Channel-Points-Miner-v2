@@ -331,13 +331,88 @@ def _wait_until_reachable(host, port, timeout=10.0, interval=0.2):
     return False
 
 
+def _enable_dashboard_from_shell(config_path):
+    """Shared by the one-time consent prompt and the Dashboard tab's
+    on-demand "Enable dashboard" button: writes enable_analytics=True (and
+    a generated password) through config_editor.py's normal AST-based edit
+    path - an explicit, in-the-moment user action, unlike the silent
+    first-run bootstrap in ensure_windows_analytics_defaults().
+
+    Does not attempt to start AnalyticsServer in this already-running
+    process. Settings.analytics_path is only ever set by
+    TwitchChannelPointsMiner.__init__ when analytics was enabled *at
+    construction time*; since it was off this run, that path never ran, and
+    safely reproducing it here would mean re-implementing that setup
+    (including its data-migration step) against a different, unrelated
+    module's private internals. A restart re-runs that setup correctly
+    instead, so this only ever saves the config and reports that a restart
+    is needed.
+
+    Returns (success, message) - message is meant to be shown to the user
+    as-is, in either a dialog or the Dashboard tab's status line.
+    """
+    try:
+        from TwitchChannelPointsMiner.config_editor import (
+            ConfigEditError,
+            enable_analytics_dashboard,
+        )
+
+        enable_analytics_dashboard(config_path, secrets.token_urlsafe(18))
+    except (ConfigEditError, OSError) as error:
+        return False, f"Could not enable the dashboard: {error}"
+    return True, "Saved. Restart the app for the dashboard to start."
+
+
+def _maybe_prompt_to_enable_analytics(window, dashboard_info, config_path, prompt_marker):
+    """One-time consent prompt for an *existing* user whose config already
+    has analytics off - shown at most once ever, regardless of the answer,
+    tracked by `prompt_marker` (separate from the onboarding marker, which
+    tracks something else: whether the Dashboard tab has been opened to the
+    Config view before).
+
+    Separate code path from ensure_windows_analytics_defaults(), which only
+    ever runs on a config this run just created; this runs for a config
+    that already existed with analytics off, for any reason.
+    """
+    if dashboard_info is not None:
+        return
+    if prompt_marker.is_file():
+        return
+
+    try:
+        wants_enable = window.create_confirmation_dialog(
+            "Enable the dashboard?",
+            "The dashboard is currently turned off. Enable it now?",
+        )
+    except Exception:
+        # The dialog itself couldn't be shown - don't mark this as
+        # "answered" so a future launch (e.g. once WebView2 is fixed) can
+        # still offer it.
+        return
+
+    try:
+        prompt_marker.touch()
+    except OSError:
+        pass
+
+    if not wants_enable:
+        return
+
+    _success, message = _enable_dashboard_from_shell(config_path)
+    try:
+        window.create_confirmation_dialog("Dashboard", message)
+    except Exception:
+        pass
+
+
 class WindowApi:
     """Bridge exposed to the shell's JavaScript as `window.pywebview.api`."""
 
-    def __init__(self, console_buffer, dashboard_info, initial_tab):
+    def __init__(self, console_buffer, dashboard_info, initial_tab, config_path):
         self._console_buffer = console_buffer
         self._dashboard_info = dashboard_info
         self._initial_tab = initial_tab
+        self._config_path = config_path
 
     def get_console_tail(self, since_seq=0):
         lines, next_seq = self._console_buffer.tail(int(since_seq or 0))
@@ -345,13 +420,21 @@ class WindowApi:
 
     def get_dashboard_info(self):
         if not self._dashboard_info:
-            return {"url": None}
+            return {"url": None, "enabled": False}
         _wait_until_reachable(self._dashboard_info["host"], self._dashboard_info["port"])
-        return {"url": self._dashboard_info["url"], "initial_tab": self._initial_tab}
+        return {
+            "url": self._dashboard_info["url"],
+            "initial_tab": self._initial_tab,
+            "enabled": True,
+        }
 
     def open_in_browser(self):
         if self._dashboard_info:
             webbrowser.open(self._dashboard_info["url"])
+
+    def enable_dashboard(self):
+        success, message = _enable_dashboard_from_shell(self._config_path)
+        return {"success": success, "message": message}
 
 
 def _make_close_confirmation_handler(window, miner_thread):
@@ -380,7 +463,9 @@ def _make_close_confirmation_handler(window, miner_thread):
     return on_closing
 
 
-def launch_shell(dashboard_info, console_buffer, initial_tab, miner_thread):
+def launch_shell(
+    dashboard_info, console_buffer, initial_tab, miner_thread, config_path, prompt_marker
+):
     """Open the two-tab desktop shell (Dashboard + Console).
 
     Imports pywebview lazily so this module stays importable - and
@@ -389,7 +474,7 @@ def launch_shell(dashboard_info, console_buffer, initial_tab, miner_thread):
     """
     import webview
 
-    api = WindowApi(console_buffer, dashboard_info, initial_tab)
+    api = WindowApi(console_buffer, dashboard_info, initial_tab, config_path)
     shell_html = bundled_file(os.path.join("assets", "windows_shell.html")).read_text(
         encoding="utf-8"
     )
@@ -402,7 +487,14 @@ def launch_shell(dashboard_info, console_buffer, initial_tab, miner_thread):
         min_size=(800, 600),
     )
     window.events.closing += _make_close_confirmation_handler(window, miner_thread)
-    webview.start()
+
+    def _on_started():
+        # Dialogs (unlike event handlers) require the GUI loop that
+        # webview.start() begins - pywebview's own examples run them via
+        # this callback, not before start() is called.
+        _maybe_prompt_to_enable_analytics(window, dashboard_info, config_path, prompt_marker)
+
+    webview.start(_on_started)
 
 
 def main():
@@ -457,9 +549,20 @@ def main():
     onboarding_marker = config_dir / ".desktop_shell_onboarded"
     is_first_shell_launch = not onboarding_marker.is_file()
     initial_tab = "config" if is_first_shell_launch else None
+    # Separate marker: tracks the one-time "enable the dashboard?" consent
+    # prompt for an existing config with analytics off, independent of the
+    # onboarding view above (see _maybe_prompt_to_enable_analytics).
+    analytics_prompt_marker = config_dir / ".shell_analytics_prompt_shown"
 
     try:
-        launch_shell(dashboard_info, console_buffer, initial_tab, miner_thread)
+        launch_shell(
+            dashboard_info,
+            console_buffer,
+            initial_tab,
+            miner_thread,
+            config_path,
+            analytics_prompt_marker,
+        )
     except Exception as error:
         # Covers a missing pywebview install, no WebView2 runtime, or any
         # other GUI backend failure - none of which should crash the miner.

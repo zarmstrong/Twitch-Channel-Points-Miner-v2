@@ -32,6 +32,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 Name: "configure"; Description: "Prefill a new configuration"; GroupDescription: "First run:"; Flags: checkedonce
+Name: "enableanalytics"; Description: "Enable the analytics dashboard (recommended)"; GroupDescription: "First run:"; Flags: checkedonce
 
 [Files]
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -148,7 +149,15 @@ begin
   // template. Both markers are still checked explicitly anyway, matching
   // config_editor.py's "never overwrite an existing configuration"
   // invariant rather than relying solely on that flag's behavior.
-  if (Pos('''enable_analytics'': False,', ConfigText) > 0) and
+  //
+  // The "enableanalytics" task only controls *whether* this already-safe
+  // step turns the dashboard on - it does not change that gating. Unchecked,
+  // the freshly-created config keeps analytics off (no password generated
+  // either) and the exe's first run falls through to its own "analytics
+  // disabled" panel and one-time enable prompt, exactly like any other
+  // disabled-analytics config.
+  if WizardIsTaskSelected('enableanalytics') and
+     (Pos('''enable_analytics'': False,', ConfigText) > 0) and
      (Pos('ANALYTICS_CONFIG = None', ConfigText) > 0) then
   begin
     StringChangeEx(ConfigText, '''enable_analytics'': False,',
