@@ -502,7 +502,31 @@ def launch_shell(
     webview.start(_on_started)
 
 
+def self_test():
+    """Verify the frozen exe actually has its GUI dependency bundled.
+
+    Used only as `--self-test`, wired up as a CI smoke-test step right
+    after build_windows.bat: it isolates the one import launch_shell()
+    needs (pywebview) without touching config, the miner, or any window,
+    so a PyInstaller bundle missing it - e.g. because a build step
+    installed requirements.txt instead of requirements-windows.txt -
+    fails the build immediately instead of only surfacing for a user at
+    runtime. Must never open a window or message box: nothing would be
+    there to dismiss it on a CI runner, and the job would hang forever.
+    """
+    try:
+        import webview  # noqa: F401
+    except Exception as error:
+        print(f"self-test FAILED: could not import webview: {error}")
+        return 1
+    print("self-test OK: webview is importable")
+    return 0
+
+
 def main():
+    if "--self-test" in sys.argv[1:]:
+        return self_test()
+
     application_dir = application_directory()
     os.chdir(application_dir)
 

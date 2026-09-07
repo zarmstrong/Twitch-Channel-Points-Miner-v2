@@ -74,6 +74,14 @@ jobs:
         shell: cmd
         run: build_windows.bat
 
+      - name: Smoke-test Windows executable
+        shell: pwsh
+        run: |
+          dist\TwitchChannelPointsMiner.exe --self-test
+          if ($LASTEXITCODE -ne 0) {
+            throw "Smoke test failed (exit code $LASTEXITCODE) - the built exe is missing a GUI dependency"
+          }
+
       - name: Build Windows installer
         shell: pwsh
         run: |

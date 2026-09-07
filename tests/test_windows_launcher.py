@@ -3,6 +3,7 @@ import os
 import socket
 import stat
 import threading
+import types
 from pathlib import Path
 
 import pytest
@@ -703,6 +704,48 @@ def test_launch_shell_surfaces_missing_pywebview(monkeypatch):
             Path("config.py"),
             Path(".shell_analytics_prompt_shown"),
         )
+
+
+def test_self_test_succeeds_when_webview_importable(monkeypatch, capsys):
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "webview":
+            return types.SimpleNamespace()
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    assert windows_launcher.self_test() == 0
+    assert "OK" in capsys.readouterr().out
+
+
+def test_self_test_fails_when_webview_missing(monkeypatch, capsys):
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "webview":
+            raise ModuleNotFoundError("No module named 'webview'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    assert windows_launcher.self_test() == 1
+    assert "FAILED" in capsys.readouterr().out
+
+
+def test_main_dispatches_to_self_test_before_touching_config(monkeypatch, tmp_path):
+    # Must short-circuit before prepare_config/os.chdir/etc. run, so this
+    # flag stays a pure, side-effect-free import check usable from CI.
+    monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe", "--self-test"])
+    monkeypatch.setattr(windows_launcher, "self_test", lambda: 42)
+    monkeypatch.setattr(
+        windows_launcher,
+        "application_directory",
+        lambda: (_ for _ in ()).throw(AssertionError("should not be reached")),
+    )
+
+    assert windows_launcher.main() == 42
 
 
 class _FakeMinerThread:
