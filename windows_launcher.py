@@ -52,6 +52,7 @@ DEFAULT_ANALYTICS_PORT = 5000
 # Used only for the literal text edit in ensure_windows_analytics_defaults()
 # below, never as a safety gate - see that function's docstring for why.
 _ANALYTICS_DISABLED_MARKER = "'enable_analytics': False,"
+_PLACEHOLDER_USERNAME = "your-twitch-username"
 
 
 def application_directory():
@@ -151,6 +152,28 @@ def _matches_template_defaults(source):
     if analytics_config_node is None:
         return False
     return _simple_value(analytics_config_node) is None
+
+
+def _needs_username(config_path):
+    """True if MINER_CONFIG['username'] is still the bundled template's
+    placeholder, or blank.
+
+    Safe to check by content, unlike the analytics gating above: a Twitch
+    username can't contain a hyphen, so "your-twitch-username" can never be
+    a value a real user deliberately chose - there is no legitimate history
+    that looks identical to this one, the way enable_analytics=False can
+    hide either an untouched template or a deliberate choice.
+    """
+    try:
+        tree = ast.parse(config_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return False
+    username = _simple_value(_dict_item(_assignment(tree, "MINER_CONFIG"), "username"))
+    return (
+        not isinstance(username, str)
+        or not username.strip()
+        or username == _PLACEHOLDER_USERNAME
+    )
 
 
 def ensure_windows_analytics_defaults(config_path, just_created):
@@ -413,15 +436,50 @@ def _maybe_prompt_to_enable_analytics(window, dashboard_info, config_path, promp
 class WindowApi:
     """Bridge exposed to the shell's JavaScript as `window.pywebview.api`."""
 
-    def __init__(self, console_buffer, dashboard_info, initial_tab, config_path):
+    def __init__(
+        self,
+        console_buffer,
+        dashboard_info,
+        initial_tab,
+        config_path,
+        needs_username,
+        start_mining,
+    ):
         self._console_buffer = console_buffer
         self._dashboard_info = dashboard_info
         self._initial_tab = initial_tab
         self._config_path = config_path
+        self._needs_username = needs_username
+        self._start_mining = start_mining
 
     def get_console_tail(self, since_seq=0):
         lines, next_seq = self._console_buffer.tail(int(since_seq or 0))
         return {"lines": lines, "next_seq": next_seq}
+
+    def get_setup_info(self):
+        """Whether the shell must collect a Twitch username - blocking the
+        normal Dashboard/Console tabs, and mining itself - before anything
+        else happens. See `submit_username`."""
+        return {"needs_username": self._needs_username}
+
+    def submit_username(self, username):
+        """Save the username the user just entered and, only now, start
+        mining - deliberately deferred until this point rather than started
+        with the bundled template's placeholder, which would just fail
+        Twitch login immediately on every first run.
+        """
+        try:
+            from TwitchChannelPointsMiner.config_editor import (
+                ConfigEditError,
+                set_miner_username,
+            )
+
+            set_miner_username(self._config_path, username)
+        except (ConfigEditError, OSError) as error:
+            return {"success": False, "message": str(error)}
+        self._needs_username = False
+        self._start_mining()
+        return {"success": True, "message": None}
 
     def get_dashboard_info(self):
         if not self._dashboard_info:
@@ -442,6 +500,21 @@ class WindowApi:
         return {"success": success, "message": message}
 
 
+class _MinerThreadHandle:
+    """Shares a reference to the miner thread between the close-confirmation
+    handler below and the first-run setup flow, which defers actually
+    creating and starting that thread until a real username is entered (see
+    `_needs_username` and `WindowApi.submit_username`) - so at the time the
+    handler is wired up, there may not be a thread yet.
+    """
+
+    def __init__(self):
+        self.thread = None
+
+    def is_alive(self):
+        return self.thread is not None and self.thread.is_alive()
+
+
 def _make_close_confirmation_handler(window, miner_thread):
     """Build a `window.events.closing` handler that blocks the close unless
     the user confirms, whenever the miner is still running.
@@ -450,6 +523,9 @@ def _make_close_confirmation_handler(window, miner_thread):
     Ctrl+C; a bare click on the window's close button must not silently end
     an unattended, hours-long mining session. Returning False from a
     pywebview `closing` handler cancels the close.
+
+    `miner_thread` only needs an `is_alive()` method - a plain Thread, or a
+    _MinerThreadHandle for a thread that may not exist yet, both work.
     """
 
     def on_closing():
@@ -469,9 +545,19 @@ def _make_close_confirmation_handler(window, miner_thread):
 
 
 def launch_shell(
-    dashboard_info, console_buffer, initial_tab, miner_thread, config_path, prompt_marker
+    dashboard_info,
+    console_buffer,
+    initial_tab,
+    miner_thread,
+    config_path,
+    prompt_marker,
+    needs_username,
+    start_mining,
 ):
-    """Open the two-tab desktop shell (Dashboard + Console).
+    """Open the two-tab desktop shell (Dashboard + Console) - or, on a first
+    run with no configured Twitch username yet, a setup screen that
+    collects one via `start_mining` before either tab (and mining itself)
+    starts. See `_needs_username` and `WindowApi.submit_username`.
 
     Imports pywebview lazily so this module stays importable - and
     unit-testable - on platforms/environments where the Windows-only
@@ -479,7 +565,9 @@ def launch_shell(
     """
     import webview
 
-    api = WindowApi(console_buffer, dashboard_info, initial_tab, config_path)
+    api = WindowApi(
+        console_buffer, dashboard_info, initial_tab, config_path, needs_username, start_mining
+    )
     shell_html = bundled_file(os.path.join("assets", "windows_shell.html")).read_text(
         encoding="utf-8"
     )
@@ -497,7 +585,11 @@ def launch_shell(
         # Dialogs (unlike event handlers) require the GUI loop that
         # webview.start() begins - pywebview's own examples run them via
         # this callback, not before start() is called.
-        _maybe_prompt_to_enable_analytics(window, dashboard_info, config_path, prompt_marker)
+        if not needs_username:
+            # Asking about the dashboard before the user has even entered a
+            # username would be premature - it can still appear on a later,
+            # normal launch once one is set.
+            _maybe_prompt_to_enable_analytics(window, dashboard_info, config_path, prompt_marker)
 
     webview.start(_on_started)
 
@@ -567,10 +659,22 @@ def main():
     # on a first run right after an upgrade.
     dashboard_info = resolve_dashboard_info(config_path)
 
-    miner_thread = threading.Thread(
-        target=runner_main, args=(argv,), name="Miner runner", daemon=True
-    )
-    miner_thread.start()
+    miner_thread_handle = _MinerThreadHandle()
+
+    def start_mining():
+        thread = threading.Thread(
+            target=runner_main, args=(argv,), name="Miner runner", daemon=True
+        )
+        miner_thread_handle.thread = thread
+        thread.start()
+
+    # A config still carrying the bundled template's placeholder username
+    # would just fail Twitch login immediately - collect a real one through
+    # the shell's setup panel first, and defer starting the miner until
+    # then, instead of starting it now knowing it can only fail.
+    needs_username = _needs_username(config_path)
+    if not needs_username:
+        start_mining()
 
     # Tied to a marker file rather than `created`, so the Windows installer's
     # own pre-created config.py (see windows_installer.iss) still gets the
@@ -588,9 +692,11 @@ def main():
             dashboard_info,
             console_buffer,
             initial_tab,
-            miner_thread,
+            miner_thread_handle,
             config_path,
             analytics_prompt_marker,
+            needs_username,
+            start_mining,
         )
     except Exception as error:
         # Covers a missing pywebview install, no WebView2 runtime, or any
@@ -601,7 +707,14 @@ def main():
         )
         print(message)
         _show_fatal_error_message(message)
-        if dashboard_info:
+        if needs_username:
+            # No dashboard exists to fall back to, and mining never started -
+            # the only way forward left is editing the file directly.
+            print(
+                "No Twitch username is configured yet. Set 'username' under "
+                f"MINER_CONFIG in {config_path} and restart."
+            )
+        elif dashboard_info:
             webbrowser.open(dashboard_info["url"])
         pause_for_first_run()
     else:
@@ -611,7 +724,8 @@ def main():
             except OSError:
                 pass
     finally:
-        miner_thread.join(timeout=2)
+        if miner_thread_handle.thread is not None:
+            miner_thread_handle.thread.join(timeout=2)
 
     return 0
 

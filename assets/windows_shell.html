@@ -123,10 +123,75 @@
             margin-top: 10px;
             color: #9aa0c0;
         }
+
+        #setup-panel {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: #1e1f29;
+            z-index: 10;
+            box-sizing: border-box;
+            padding: 40px;
+            overflow: auto;
+        }
+
+        #setup-panel .setup-card {
+            max-width: 420px;
+            margin: 60px auto 0;
+            line-height: 1.5;
+        }
+
+        #setup-username-input {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 8px 10px;
+            margin-top: 10px;
+            font-size: 14px;
+            border-radius: 4px;
+            border: 1px solid #444;
+            background: #14151d;
+            color: #eee;
+        }
+
+        #setup-submit-button {
+            background: #f9826c;
+            color: #1e1f29;
+            border: none;
+            padding: 8px 18px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: bold;
+            margin-top: 14px;
+        }
+
+        #setup-submit-button:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+
+        #setup-status {
+            margin-top: 10px;
+            color: #ff8f8f;
+            min-height: 1.2em;
+        }
     </style>
 </head>
 
 <body>
+    <div id="setup-panel">
+        <div class="setup-card">
+            <h2>Welcome!</h2>
+            <p>Enter the Twitch username this miner should log in as. You can change it later
+                from the Config tab.</p>
+            <input id="setup-username-input" type="text" placeholder="Your Twitch username" autofocus>
+            <div>
+                <button id="setup-submit-button" type="button">Start mining</button>
+            </div>
+            <p id="setup-status"></p>
+        </div>
+    </div>
+
     <div id="shell-tabs">
         <button id="shell-tab-dashboard" class="active" type="button">Dashboard</button>
         <button id="shell-tab-console" type="button">Console</button>
@@ -244,9 +309,58 @@
             });
         }
 
-        window.addEventListener('pywebviewready', function () {
+        function startNormalShell() {
             loadDashboard();
             pollConsole();
+        }
+
+        function submitUsername() {
+            var input = document.getElementById('setup-username-input');
+            var button = document.getElementById('setup-submit-button');
+            var status = document.getElementById('setup-status');
+            var username = input.value.trim();
+            if (!username) {
+                status.textContent = 'Enter a username first.';
+                return;
+            }
+            button.disabled = true;
+            status.textContent = '';
+            window.pywebview.api.submit_username(username).then(function (result) {
+                if (result && result.success) {
+                    document.getElementById('setup-panel').style.display = 'none';
+                    startNormalShell();
+                } else {
+                    // The message can include arbitrary error text, so never
+                    // treat it as HTML.
+                    status.textContent = (result && result.message) || 'Something went wrong.';
+                    button.disabled = false;
+                }
+            }).catch(function () {
+                status.textContent = 'Something went wrong.';
+                button.disabled = false;
+            });
+        }
+
+        document.getElementById('setup-submit-button').addEventListener('click', submitUsername);
+        document.getElementById('setup-username-input').addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') submitUsername();
+        });
+
+        window.addEventListener('pywebviewready', function () {
+            // The shell must not start mining (or show it as if it had) with
+            // the bundled template's placeholder username, so this decides
+            // whether to block on the setup panel above before doing
+            // anything else.
+            window.pywebview.api.get_setup_info().then(function (info) {
+                if (info && info.needs_username) {
+                    document.getElementById('setup-panel').style.display = 'block';
+                    document.getElementById('setup-username-input').focus();
+                } else {
+                    startNormalShell();
+                }
+            }).catch(function () {
+                startNormalShell();
+            });
         });
     </script>
 </body>

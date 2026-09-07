@@ -27,6 +27,7 @@ from TwitchChannelPointsMiner.config_editor import (
     load_web_overrides,
     migrate_web_config,
     read_managed_web_config,
+    set_miner_username,
     update_managed_web_config,
 )
 from TwitchChannelPointsMiner.logger import LoggerSettings
@@ -909,6 +910,51 @@ def test_enable_analytics_dashboard_requires_analytics_config_assignment(tmp_pat
 
     with pytest.raises(ConfigEditError, match="ANALYTICS_CONFIG"):
         enable_analytics_dashboard(config, password="secret")
+
+
+def test_set_miner_username_preserves_formatting_and_comments(tmp_path):
+    # Used by the Windows desktop shell's first-run setup panel, which
+    # collects a real Twitch username before mining starts (see
+    # windows_launcher.py's _needs_username/WindowApi.submit_username) - a
+    # deliberate, in-the-moment user action, so this must preserve the rest
+    # of the file, comments included, like every other dashboard-driven edit.
+    config = tmp_path / "config.py"
+    config.write_text(
+        """\
+# my custom header comment
+MINER_CONFIG = {
+    "username": "your-twitch-username",
+    "enable_analytics": False,  # inline comment
+}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+""",
+        encoding="utf-8",
+    )
+
+    result = set_miner_username(config, "  real_twitch_user  ")
+
+    assert result == "real_twitch_user"
+    source = config.read_text(encoding="utf-8")
+    assert "# my custom header comment" in source
+    assert '"enable_analytics": False,  # inline comment' in source
+
+    module = _load_config(config)
+    assert module.MINER_CONFIG["username"] == "real_twitch_user"
+
+
+def test_set_miner_username_rejects_invalid_characters(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text('MINER_CONFIG = {"username": "your-twitch-username"}\n', encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="valid Twitch username"):
+        set_miner_username(config, "not a valid username!!!")
+
+    assert (
+        config.read_text(encoding="utf-8")
+        == 'MINER_CONFIG = {"username": "your-twitch-username"}\n'
+    )
 
 
 def test_legacy_streamers_migrate_in_one_source_rewrite(tmp_path, monkeypatch):

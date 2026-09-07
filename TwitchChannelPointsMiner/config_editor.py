@@ -765,6 +765,24 @@ def enable_analytics_dashboard(
     _replace_config_node(config_path, analytics_config_node, rendered)
 
 
+def set_miner_username(config_path, username):
+    """Set MINER_CONFIG['username'] - the Twitch account the miner logs in
+    as - on an existing configuration.
+
+    Used by the Windows desktop shell's first-run setup prompt (see
+    windows_launcher.py), shown when a config's username is still the
+    bundled template's placeholder. Twitch account usernames follow the
+    same character rules as a streamer username, so STREAMER_RE is reused
+    for validation. Writes through the normal AST edit path, preserving
+    the rest of the file untouched.
+    """
+    username = username.strip()
+    if not STREAMER_RE.fullmatch(username):
+        raise ConfigEditError("Enter a valid Twitch username.")
+    _set_dict_items(config_path, "MINER_CONFIG", {"username": repr(username)})
+    return username
+
+
 def _write_logger_settings(config_path, values):
     rendered = {
         name: (

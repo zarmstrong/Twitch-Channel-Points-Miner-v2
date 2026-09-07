@@ -16,13 +16,25 @@ def _fake_launch_shell_recording(calls, extract=lambda dashboard_info, initial_t
     initial_tab,
 )):
     """A `launch_shell` stand-in accepting its full current signature, so
-    call-site tests don't need to know about args (config_path, prompt_marker)
-    they aren't exercising."""
+    call-site tests don't need to know about args (config_path, prompt_marker,
+    needs_username, start_mining) they aren't exercising."""
 
-    def fake(dashboard_info, console_buffer, initial_tab, miner_thread, config_path, prompt_marker):
+    def fake(
+        dashboard_info,
+        console_buffer,
+        initial_tab,
+        miner_thread,
+        config_path,
+        prompt_marker,
+        needs_username,
+        start_mining,
+    ):
         calls.append(extract(dashboard_info, initial_tab))
 
     return fake
+
+
+_REAL_USERNAME = "a_real_twitch_user"
 
 
 def test_prepare_config_copies_template_once(tmp_path, monkeypatch):
@@ -91,7 +103,7 @@ def test_main_starts_miner_thread_and_launches_shell_when_interactive(
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "config.py").write_text(
-        "MINER_CONFIG = {'enable_analytics': False}\n"
+        f"MINER_CONFIG = {{'username': {_REAL_USERNAME!r}, 'enable_analytics': False}}\n"
         "STREAMERS = []\n"
         "MINE_CONFIG = {}\n"
         "ANALYTICS_CONFIG = None\n",
@@ -131,6 +143,96 @@ def test_main_starts_miner_thread_and_launches_shell_when_interactive(
         ]
     ]
     assert shell_calls == [(None, None)]
+
+
+def test_main_defers_mining_until_username_is_submitted(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.py").write_text(
+        "MINER_CONFIG = {'username': 'your-twitch-username', 'enable_analytics': False}\n"
+        "STREAMERS = []\n"
+        "MINE_CONFIG = {}\n"
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".desktop_shell_onboarded").touch()
+    runner_calls = []
+    shell_calls = []
+    monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(
+        windows_launcher, "runner_main", lambda argv: runner_calls.append(argv) or 0
+    )
+
+    def fake_launch_shell(
+        dashboard_info,
+        console_buffer,
+        initial_tab,
+        miner_thread,
+        config_path,
+        prompt_marker,
+        needs_username,
+        start_mining,
+    ):
+        shell_calls.append(needs_username)
+        # Mining must not have started before the (simulated) setup panel
+        # submission below - a placeholder username would just fail login.
+        assert runner_calls == []
+        assert miner_thread.is_alive() is False
+        # Stands in for WindowApi.submit_username() being called from the
+        # shell's setup panel once the user enters a real username.
+        start_mining()
+
+    monkeypatch.setattr(windows_launcher, "launch_shell", fake_launch_shell)
+    monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
+
+    assert windows_launcher.main() == 0
+
+    assert shell_calls == [True]
+    assert runner_calls == [
+        [
+            "--config-dir",
+            str(config_dir),
+            "--legacy-runner",
+            str(tmp_path / "run.py"),
+        ]
+    ]
+
+
+def test_main_prints_guidance_when_shell_fails_before_username_is_set(
+    tmp_path, monkeypatch, capsys
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.py").write_text(
+        "MINER_CONFIG = {'username': 'your-twitch-username'}\n"
+        "STREAMERS = []\n"
+        "MINE_CONFIG = {}\n"
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    opened = []
+    paused = []
+    monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(windows_launcher, "runner_main", lambda argv: 0)
+    monkeypatch.setattr(
+        windows_launcher,
+        "launch_shell",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no WebView2 runtime")),
+    )
+    monkeypatch.setattr(windows_launcher.webbrowser, "open", lambda url: opened.append(url))
+    monkeypatch.setattr(windows_launcher, "pause_for_first_run", lambda: paused.append(True))
+    monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
+
+    assert windows_launcher.main() == 0
+
+    # No dashboard exists to fall back to when mining never started.
+    assert opened == []
+    assert paused == [True]
+    assert "No Twitch username is configured yet." in capsys.readouterr().out
 
 
 def test_main_enables_analytics_and_opens_config_tab_on_first_run(tmp_path, monkeypatch):
@@ -184,7 +286,7 @@ def test_main_opens_config_tab_for_preexisting_installer_created_config(
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "config.py").write_text(
-        "MINER_CONFIG = {'enable_analytics': True}\n"
+        f"MINER_CONFIG = {{'username': {_REAL_USERNAME!r}, 'enable_analytics': True}}\n"
         "STREAMERS = []\n"
         "MINE_CONFIG = {}\n"
         "ANALYTICS_CONFIG = {'host': '127.0.0.1', 'port': 5000}\n",
@@ -264,7 +366,7 @@ def test_main_falls_back_to_browser_when_shell_launch_fails(tmp_path, monkeypatc
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "config.py").write_text(
-        "MINER_CONFIG = {'enable_analytics': True}\n"
+        f"MINER_CONFIG = {{'username': {_REAL_USERNAME!r}, 'enable_analytics': True}}\n"
         "STREAMERS = []\n"
         "MINE_CONFIG = {}\n"
         "ANALYTICS_CONFIG = {'host': '127.0.0.1', 'port': 5000}\n",
@@ -451,6 +553,37 @@ def test_matches_template_defaults_true_only_for_untouched_defaults():
     assert windows_launcher._matches_template_defaults("not valid python (((") is False
 
 
+def test_needs_username_true_for_bundled_placeholder(tmp_path):
+    config_path = tmp_path / "config.py"
+    config_path.write_text(
+        "MINER_CONFIG = {'username': 'your-twitch-username'}\n", encoding="utf-8"
+    )
+
+    assert windows_launcher._needs_username(config_path) is True
+
+
+def test_needs_username_true_for_blank_or_missing_value(tmp_path):
+    config_path = tmp_path / "config.py"
+    config_path.write_text("MINER_CONFIG = {'username': '   '}\n", encoding="utf-8")
+    assert windows_launcher._needs_username(config_path) is True
+
+    config_path.write_text("MINER_CONFIG = {}\n", encoding="utf-8")
+    assert windows_launcher._needs_username(config_path) is True
+
+
+def test_needs_username_false_for_a_real_username(tmp_path):
+    config_path = tmp_path / "config.py"
+    config_path.write_text(
+        f"MINER_CONFIG = {{'username': {_REAL_USERNAME!r}}}\n", encoding="utf-8"
+    )
+
+    assert windows_launcher._needs_username(config_path) is False
+
+
+def test_needs_username_false_for_unreadable_config(tmp_path):
+    assert windows_launcher._needs_username(tmp_path / "missing.py") is False
+
+
 def test_resolve_dashboard_info_returns_none_when_analytics_disabled(tmp_path):
     config_path = tmp_path / "config.py"
     config_path.write_text(
@@ -597,7 +730,12 @@ def test_window_api_get_console_tail_delegates_to_buffer():
     buffer = windows_launcher.ConsoleBuffer()
     buffer.write("hello\n")
     api = windows_launcher.WindowApi(
-        buffer, dashboard_info=None, initial_tab=None, config_path=None
+        buffer,
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=None,
+        needs_username=False,
+        start_mining=lambda: None,
     )
 
     result = api.get_console_tail(0)
@@ -611,6 +749,8 @@ def test_window_api_get_dashboard_info_returns_disabled_state():
         dashboard_info=None,
         initial_tab=None,
         config_path=None,
+        needs_username=False,
+        start_mining=lambda: None,
     )
 
     assert api.get_dashboard_info() == {"url": None, "enabled": False}
@@ -625,7 +765,12 @@ def test_window_api_get_dashboard_info_waits_for_port_then_returns_url(monkeypat
     )
     dashboard_info = {"host": "127.0.0.1", "port": 5000, "url": "http://127.0.0.1:5000/"}
     api = windows_launcher.WindowApi(
-        windows_launcher.ConsoleBuffer(), dashboard_info, initial_tab="config", config_path=None
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info,
+        initial_tab="config",
+        config_path=None,
+        needs_username=False,
+        start_mining=lambda: None,
     )
 
     result = api.get_dashboard_info()
@@ -643,7 +788,12 @@ def test_window_api_open_in_browser_opens_dashboard_url(monkeypatch):
     monkeypatch.setattr(windows_launcher.webbrowser, "open", lambda url: opened.append(url))
     dashboard_info = {"host": "127.0.0.1", "port": 5000, "url": "http://127.0.0.1:5000/"}
     api = windows_launcher.WindowApi(
-        windows_launcher.ConsoleBuffer(), dashboard_info, initial_tab=None, config_path=None
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info,
+        initial_tab=None,
+        config_path=None,
+        needs_username=False,
+        start_mining=lambda: None,
     )
 
     api.open_in_browser()
@@ -658,7 +808,12 @@ def test_window_api_open_in_browser_noop_when_dashboard_unavailable(monkeypatch)
         lambda _url: (_ for _ in ()).throw(AssertionError("should not open a browser")),
     )
     api = windows_launcher.WindowApi(
-        windows_launcher.ConsoleBuffer(), dashboard_info=None, initial_tab=None, config_path=None
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=None,
+        needs_username=False,
+        start_mining=lambda: None,
     )
 
     api.open_in_browser()
@@ -677,12 +832,72 @@ def test_window_api_enable_dashboard_delegates_to_shared_helper(tmp_path, monkey
         dashboard_info=None,
         initial_tab=None,
         config_path=config_path,
+        needs_username=False,
+        start_mining=lambda: None,
     )
 
     result = api.enable_dashboard()
 
     assert calls == [config_path]
     assert result == {"success": True, "message": "Saved."}
+
+
+def test_window_api_get_setup_info_reflects_constructor_flag():
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=None,
+        needs_username=True,
+        start_mining=lambda: None,
+    )
+
+    assert api.get_setup_info() == {"needs_username": True}
+
+
+def test_window_api_submit_username_saves_and_starts_mining(tmp_path):
+    config_path = tmp_path / "config.py"
+    config_path.write_text(
+        "MINER_CONFIG = {'username': 'your-twitch-username'}\n", encoding="utf-8"
+    )
+    started = []
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=config_path,
+        needs_username=True,
+        start_mining=lambda: started.append(True),
+    )
+
+    result = api.submit_username(_REAL_USERNAME)
+
+    assert result == {"success": True, "message": None}
+    assert started == [True]
+    assert api.get_setup_info() == {"needs_username": False}
+    assert f"'username': {_REAL_USERNAME!r}" in config_path.read_text(encoding="utf-8")
+
+
+def test_window_api_submit_username_reports_invalid_username_without_starting(tmp_path):
+    config_path = tmp_path / "config.py"
+    config_path.write_text(
+        "MINER_CONFIG = {'username': 'your-twitch-username'}\n", encoding="utf-8"
+    )
+    started = []
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=config_path,
+        needs_username=True,
+        start_mining=lambda: started.append(True),
+    )
+
+    result = api.submit_username("not a valid username!!!")
+
+    assert result["success"] is False
+    assert started == []
+    assert api.get_setup_info() == {"needs_username": True}
 
 
 def test_launch_shell_surfaces_missing_pywebview(monkeypatch):
@@ -703,6 +918,8 @@ def test_launch_shell_surfaces_missing_pywebview(monkeypatch):
             threading.Thread(),
             Path("config.py"),
             Path(".shell_analytics_prompt_shown"),
+            False,
+            lambda: None,
         )
 
 
@@ -746,6 +963,21 @@ def test_main_dispatches_to_self_test_before_touching_config(monkeypatch, tmp_pa
     )
 
     assert windows_launcher.main() == 42
+
+
+def test_miner_thread_handle_not_alive_before_a_thread_is_assigned():
+    # The state during first-run setup: the close handler must be able to
+    # ask is_alive() even though start_mining() hasn't run yet.
+    handle = windows_launcher._MinerThreadHandle()
+
+    assert handle.is_alive() is False
+
+
+def test_miner_thread_handle_reflects_assigned_thread():
+    handle = windows_launcher._MinerThreadHandle()
+    handle.thread = _FakeMinerThread(alive=True)
+
+    assert handle.is_alive() is True
 
 
 class _FakeMinerThread:
@@ -873,6 +1105,8 @@ def test_launch_shell_wires_close_confirmation_handler(tmp_path, monkeypatch):
         _FakeMinerThread(alive=True),
         tmp_path / "config.py",
         tmp_path / ".shell_analytics_prompt_shown",
+        False,
+        lambda: None,
     )
 
     assert callable(fake_webview.window.events.closing.handler)
@@ -903,9 +1137,34 @@ def test_launch_shell_runs_analytics_prompt_check_via_start_callback(tmp_path, m
         _FakeMinerThread(alive=True),
         config_path,
         prompt_marker,
+        False,
+        lambda: None,
     )
 
     assert calls == [(fake_webview.window, None, config_path, prompt_marker)]
+
+
+def test_launch_shell_skips_analytics_prompt_while_username_setup_pending(tmp_path, monkeypatch):
+    # Asking about the dashboard before the user has even entered a
+    # username would be premature - see launch_shell's _on_started.
+    fake_webview = _FakeWebview()
+    _patch_fake_webview(monkeypatch, fake_webview)
+    monkeypatch.setattr(
+        windows_launcher,
+        "_maybe_prompt_to_enable_analytics",
+        lambda *a: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    windows_launcher.launch_shell(
+        None,
+        windows_launcher.ConsoleBuffer(),
+        None,
+        _FakeMinerThread(alive=False),
+        tmp_path / "config.py",
+        tmp_path / ".shell_analytics_prompt_shown",
+        True,
+        lambda: None,
+    )
 
 
 def test_show_fatal_error_message_uses_native_message_box_on_windows(monkeypatch):
@@ -1129,7 +1388,7 @@ def test_main_installer_style_disabled_config_shows_disabled_flow_end_to_end(
     # is a verified no-op, isolating the disabled-analytics flow under test.
     original_config = (
         f"CONFIG_VERSION = {CONFIG_VERSION}\n"
-        "MINER_CONFIG = {'enable_analytics': False}\n"
+        f"MINER_CONFIG = {{'username': {_REAL_USERNAME!r}, 'enable_analytics': False}}\n"
         "STREAMERS = []\n"
         "MINE_CONFIG = {}\n"
         "ANALYTICS_CONFIG = None\n"
@@ -1144,7 +1403,14 @@ def test_main_installer_style_disabled_config_shows_disabled_flow_end_to_end(
     monkeypatch.setattr(windows_launcher, "runner_main", lambda argv: 0)
 
     def fake_launch_shell(
-        dashboard_info, console_buffer, initial_tab, miner_thread, config_path, prompt_marker
+        dashboard_info,
+        console_buffer,
+        initial_tab,
+        miner_thread,
+        config_path,
+        prompt_marker,
+        needs_username,
+        start_mining,
     ):
         shell_calls.append((dashboard_info, initial_tab))
         # Exercises the real prompt-gating logic (not just that launch_shell
