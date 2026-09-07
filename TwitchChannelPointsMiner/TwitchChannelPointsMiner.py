@@ -138,6 +138,21 @@ def _normalize_drop_progress_stall_minutes(minutes):
     return 10.0
 
 
+def _normalize_drop_pick_stickiness_minutes(minutes):
+    if (
+        isinstance(minutes, (int, float))
+        and not isinstance(minutes, bool)
+        and math.isfinite(minutes)
+        and minutes >= 0
+    ):
+        return float(minutes)
+    logger.error(
+        "drop_pick_stickiness_minutes must be a non-negative number; "
+        "using the default value 15"
+    )
+    return 15.0
+
+
 def _normalize_wildcard_category_positive_int(value, name, default):
     if type(value) is int and not isinstance(value, bool) and value > 0:
         return value
@@ -572,6 +587,7 @@ class TwitchChannelPointsMiner:
         track_category_streamer_points: bool = False,
         category_refresh_interval_hours: float = 6,
         drop_progress_stall_minutes: float = 10,
+        drop_pick_stickiness_minutes: float = 15,
         drop_badge_catalog: bool = True,
         drop_badge_refresh_interval_hours: float = 1,
         auto_mine_badge_drops: bool = False,
@@ -600,6 +616,7 @@ class TwitchChannelPointsMiner:
             track_category_streamer_points=track_category_streamer_points,
             category_refresh_interval_hours=category_refresh_interval_hours,
             drop_progress_stall_minutes=drop_progress_stall_minutes,
+            drop_pick_stickiness_minutes=drop_pick_stickiness_minutes,
             drop_badge_catalog=drop_badge_catalog,
             drop_badge_refresh_interval_hours=drop_badge_refresh_interval_hours,
             auto_mine_badge_drops=auto_mine_badge_drops,
@@ -630,6 +647,7 @@ class TwitchChannelPointsMiner:
         track_category_streamer_points: bool = False,
         category_refresh_interval_hours: float = 6,
         drop_progress_stall_minutes: float = 10,
+        drop_pick_stickiness_minutes: float = 15,
         drop_badge_catalog: bool = True,
         drop_badge_refresh_interval_hours: float = 1,
         auto_mine_badge_drops: bool = False,
@@ -655,6 +673,9 @@ class TwitchChannelPointsMiner:
             self.twitch.category_log_level = category_log_level
             drop_progress_stall_minutes = _normalize_drop_progress_stall_minutes(
                 drop_progress_stall_minutes
+            )
+            drop_pick_stickiness_minutes = _normalize_drop_pick_stickiness_minutes(
+                drop_pick_stickiness_minutes
             )
             Settings.track_category_streamer_points = track_category_streamer_points
             self.auto_mine_badge_drops = auto_mine_badge_drops is True
@@ -1009,6 +1030,7 @@ class TwitchChannelPointsMiner:
                     "streams_watched": self.streams_watched,
                     "source_priority": self.streamer_source_priority,
                     "drop_progress_stall_minutes": drop_progress_stall_minutes,
+                    "drop_pick_stickiness_minutes": drop_pick_stickiness_minutes,
                 },
             )
             self.minute_watcher_thread.name = "Minute watcher"
