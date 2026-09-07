@@ -310,6 +310,20 @@ def test_first_run_does_not_pause_on_other_platforms(monkeypatch):
     windows_launcher.pause_for_first_run()
 
 
+def test_first_run_pause_is_a_noop_without_stdin(monkeypatch):
+    # A --windowed/--noconsole build has sys.stdin set to None; input() then
+    # raises RuntimeError("lost sys.stdin") immediately rather than
+    # EOFError, which previously went uncaught and crashed the process.
+    monkeypatch.setattr(windows_launcher.os, "name", "nt")
+    monkeypatch.setattr(windows_launcher.sys, "stdin", None)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: (_ for _ in ()).throw(RuntimeError("lost sys.stdin")),
+    )
+
+    windows_launcher.pause_for_first_run()
+
+
 _PRISTINE_TEMPLATE_CONFIG = (
     "MINER_CONFIG = {\n"
     "    'username': 'someone',\n"
