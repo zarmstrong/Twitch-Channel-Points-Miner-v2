@@ -2,6 +2,7 @@
 
 """Windows executable entry point for Twitch Channel Points Miner."""
 
+import ast
 import ctypes  # cross-platform stdlib module; only .windll is Windows-only (guarded below)
 import os
 import secrets
@@ -44,16 +45,13 @@ if sys.stderr is None:
     sys.stderr = _NullStream()
 
 
+from TwitchChannelPointsMiner.config_editor import _assignment, _dict_item, _simple_value
 from TwitchChannelPointsMiner.runner import main as runner_main  # noqa: E402
 
 DEFAULT_ANALYTICS_PORT = 5000
+# Used only for the literal text edit in ensure_windows_analytics_defaults()
+# below, never as a safety gate - see that function's docstring for why.
 _ANALYTICS_DISABLED_MARKER = "'enable_analytics': False,"
-# ensure_windows_analytics_defaults() below only ever touches a config still
-# at these exact bundled-template defaults. windows_installer.iss's
-# CustomizeStarterConfig has an equivalent check (search it for this
-# function's name) for the installer's own pre-created config.py - keep the
-# two in sync if either changes.
-_ANALYTICS_CONFIG_UNSET_MARKER = "ANALYTICS_CONFIG = None"
 
 
 def application_directory():
@@ -116,32 +114,86 @@ def _show_fatal_error_message(text):
         pass
 
 
-def ensure_windows_analytics_defaults(config_path):
-    """First-run only: turn on the embedded dashboard with a generated password.
+def _matches_template_defaults(source):
+    """True only if this config's CURRENT VALUES for enable_analytics and
+    ANALYTICS_CONFIG equal the bundled template's defaults (False and None).
+
+    This confirms the config currently matches those defaults - it does NOT
+    confirm the file was never intentionally set that way; those are
+    different guarantees. A user who deliberately chose
+    enable_analytics=False and left ANALYTICS_CONFIG unset produces content
+    indistinguishable from an untouched template. This is purely a
+    defense-in-depth check (for a bundled template whose shape has changed
+    unexpectedly), layered on top of the provenance check in
+    ensure_windows_analytics_defaults() - it is not, by itself, a safe
+    substitute for that check. Parsed with config_editor.py's existing
+    AST helpers rather than a second, parallel implementation.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+
+    enable_analytics_node = _dict_item(
+        _assignment(tree, "MINER_CONFIG"), "enable_analytics"
+    )
+    if enable_analytics_node is None:
+        return False
+    if _simple_value(enable_analytics_node) is not False:
+        return False
+
+    analytics_config_node = _assignment(tree, "ANALYTICS_CONFIG")
+    if analytics_config_node is None:
+        return False
+    return _simple_value(analytics_config_node) is None
+
+
+def ensure_windows_analytics_defaults(config_path, just_created):
+    """Turn on the embedded dashboard with a generated password.
 
     The bundled template ships with analytics disabled, so a brand-new user
     would otherwise have nothing for the shell's Dashboard tab to show.
-    Intended to only ever run once, immediately after `prepare_config` writes
-    a fresh config from the template - but also independently checks the
-    file's actual content (not just trusting the caller's `created` gate) so
-    it can never overwrite a configuration someone has already touched,
-    matching config_editor.py's "never overwrite an existing configuration"
-    invariant. Returns the generated password, or None if either marker this
-    looks for is missing - either because the template's shape changed, or
-    because enable_analytics/ANALYTICS_CONFIG have already been customized.
 
-    windows_installer.iss's CustomizeStarterConfig procedure is a Pascal
-    port of this same logic for the installer's own pre-created config.py;
-    keep the two in sync.
+    `just_created` must be True only when the caller's own copy of the
+    bundled template to `config_path` happened in *this* run (see
+    `prepare_config`'s return value). This function deliberately does not,
+    and cannot safely, infer freshness by reopening and inspecting the
+    file's current content: a user who deliberately set
+    enable_analytics=False and left ANALYTICS_CONFIG unset - a legitimate,
+    intentional choice - produces content byte-for-byte indistinguishable
+    from an untouched template. Only provenance (did *this* call just create
+    the file?) can tell those two histories apart; a content check cannot,
+    no matter how it is implemented. Making the caller pass this explicitly
+    turns "don't call this on an existing config" into an API contract a
+    future refactor can see and violate visibly, instead of a content
+    heuristic it could silently defeat.
+
+    A secondary, defense-in-depth content check (`_matches_template_defaults`)
+    still runs after the provenance check passes, in case the bundled
+    template's own shape has changed unexpectedly - see its docstring for
+    why it is not a substitute for the provenance check above.
+
+    windows_installer.iss's CustomizeStarterConfig is a Pascal port of this
+    for the installer's own pre-created config.py, correctly gated instead
+    by Inno Setup's onlyifdoesntexist/AfterInstall provenance (a file-copy
+    that is skipped never runs AfterInstall) - keep the two in sync if the
+    written defaults change.
     """
-    source = config_path.read_text(encoding="utf-8")
-    if _ANALYTICS_DISABLED_MARKER not in source:
+    if not just_created:
         return None
-    if _ANALYTICS_CONFIG_UNSET_MARKER not in source:
+
+    source = config_path.read_text(encoding="utf-8")
+    if not _matches_template_defaults(source):
         return None
 
     password = secrets.token_urlsafe(18)
     updated = source.replace(_ANALYTICS_DISABLED_MARKER, "'enable_analytics': True,", 1)
+    if updated == source:
+        # _matches_template_defaults confirmed enable_analytics is False,
+        # but this exact literal text wasn't found to replace (e.g. a
+        # different quote or spacing style) - bail out rather than append an
+        # ANALYTICS_CONFIG block that nothing would actually turn on.
+        return None
     updated += (
         "\n"
         "# --- Added by the Windows launcher on first run ---\n"
@@ -377,7 +429,7 @@ def main():
     if created:
         print(f"Created {config_path}")
         if interactive:
-            password = ensure_windows_analytics_defaults(config_path)
+            password = ensure_windows_analytics_defaults(config_path, just_created=created)
             if password:
                 print(
                     "Enabled the embedded dashboard for this first run. If "

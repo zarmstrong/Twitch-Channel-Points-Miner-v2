@@ -304,18 +304,22 @@ def test_first_run_does_not_pause_on_other_platforms(monkeypatch):
     windows_launcher.pause_for_first_run()
 
 
-def test_ensure_windows_analytics_defaults_enables_dashboard(tmp_path):
-    config_path = tmp_path / "config.py"
-    config_path.write_text(
-        "MINER_CONFIG = {\n"
-        "    'username': 'someone',\n"
-        "    'enable_analytics': False,\n"
-        "}\n"
-        "ANALYTICS_CONFIG = None\n",
-        encoding="utf-8",
-    )
+_PRISTINE_TEMPLATE_CONFIG = (
+    "MINER_CONFIG = {\n"
+    "    'username': 'someone',\n"
+    "    'enable_analytics': False,\n"
+    "}\n"
+    "ANALYTICS_CONFIG = None\n"
+)
 
-    password = windows_launcher.ensure_windows_analytics_defaults(config_path)
+
+def test_ensure_windows_analytics_defaults_enables_dashboard_when_just_created(tmp_path):
+    config_path = tmp_path / "config.py"
+    config_path.write_text(_PRISTINE_TEMPLATE_CONFIG, encoding="utf-8")
+
+    password = windows_launcher.ensure_windows_analytics_defaults(
+        config_path, just_created=True
+    )
 
     assert password
     updated = config_path.read_text(encoding="utf-8")
@@ -328,21 +332,68 @@ def test_ensure_windows_analytics_defaults_enables_dashboard(tmp_path):
     assert updated.count("ANALYTICS_CONFIG") == 2
 
 
+def test_ensure_windows_analytics_defaults_never_applied_when_not_just_created(tmp_path):
+    # The core fix: content alone can never distinguish "a template we just
+    # copied" from "a user who deliberately chose enable_analytics=False and
+    # left ANALYTICS_CONFIG unset" - both produce this exact same text. Only
+    # provenance (just_created) can tell them apart, so it must be checked
+    # regardless of how pristine the content looks.
+    config_path = tmp_path / "config.py"
+    config_path.write_text(_PRISTINE_TEMPLATE_CONFIG, encoding="utf-8")
+
+    result = windows_launcher.ensure_windows_analytics_defaults(
+        config_path, just_created=False
+    )
+
+    assert result is None
+    assert config_path.read_text(encoding="utf-8") == _PRISTINE_TEMPLATE_CONFIG
+
+
+def test_ensure_windows_analytics_defaults_respects_deliberate_user_choice(tmp_path):
+    # The specific scenario that motivated this fix: a user upgrading from a
+    # pre-shell build who deliberately set enable_analytics=False on purpose
+    # (not a template leftover) and never configured ANALYTICS_CONFIG. This
+    # is indistinguishable, by content, from a fresh template - it must
+    # survive an upgrade-path launch (just_created=False) unchanged.
+    config_path = tmp_path / "config.py"
+    original = (
+        "MINER_CONFIG = {\n"
+        "    'username': 'someone',\n"
+        "    'enable_analytics': False,  # deliberately disabled, not a leftover\n"
+        "}\n"
+        "STREAMERS = []\n"
+        "ANALYTICS_CONFIG = None\n"
+    )
+    config_path.write_text(original, encoding="utf-8")
+
+    result = windows_launcher.ensure_windows_analytics_defaults(
+        config_path, just_created=False
+    )
+
+    assert result is None
+    assert config_path.read_text(encoding="utf-8") == original
+
+
 def test_ensure_windows_analytics_defaults_leaves_unrecognized_template_alone(tmp_path):
+    # Provenance says this is fine to touch, but the secondary,
+    # defense-in-depth content check (_matches_template_defaults) still
+    # blocks it because the content itself doesn't match what's expected -
+    # e.g. the bundled template's shape changed unexpectedly.
     config_path = tmp_path / "config.py"
     original = "MINER_CONFIG = {'enable_analytics': True}\n"
     config_path.write_text(original, encoding="utf-8")
 
-    result = windows_launcher.ensure_windows_analytics_defaults(config_path)
+    result = windows_launcher.ensure_windows_analytics_defaults(
+        config_path, just_created=True
+    )
 
     assert result is None
     assert config_path.read_text(encoding="utf-8") == original
 
 
 def test_ensure_windows_analytics_defaults_ignores_customized_analytics_config(tmp_path):
-    # Defense in depth: even called directly - bypassing main()'s `created`
-    # gate and windows_installer.iss's AfterInstall/onlyifdoesntexist gate -
-    # this must never touch a config where ANALYTICS_CONFIG has already been
+    # Secondary content check again: even with just_created=True, this must
+    # never touch a config where ANALYTICS_CONFIG has already been
     # customized, even though enable_analytics is still False verbatim.
     config_path = tmp_path / "config.py"
     original = (
@@ -353,10 +404,30 @@ def test_ensure_windows_analytics_defaults_ignores_customized_analytics_config(t
     )
     config_path.write_text(original, encoding="utf-8")
 
-    result = windows_launcher.ensure_windows_analytics_defaults(config_path)
+    result = windows_launcher.ensure_windows_analytics_defaults(
+        config_path, just_created=True
+    )
 
     assert result is None
     assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_matches_template_defaults_true_only_for_untouched_defaults():
+    assert windows_launcher._matches_template_defaults(_PRISTINE_TEMPLATE_CONFIG) is True
+    assert (
+        windows_launcher._matches_template_defaults(
+            "MINER_CONFIG = {'enable_analytics': True}\nANALYTICS_CONFIG = None\n"
+        )
+        is False
+    )
+    assert (
+        windows_launcher._matches_template_defaults(
+            "MINER_CONFIG = {'enable_analytics': False}\n"
+            "ANALYTICS_CONFIG = {'host': '127.0.0.1'}\n"
+        )
+        is False
+    )
+    assert windows_launcher._matches_template_defaults("not valid python (((") is False
 
 
 def test_resolve_dashboard_info_returns_none_when_analytics_disabled(tmp_path):
