@@ -207,6 +207,7 @@ MINE_CONFIG = {
     'log_drop_checks': True,
     'category_refresh_interval_hours': 3,
     'drop_progress_stall_minutes': 10,
+    'drop_pick_stickiness_minutes': 15,         # Keep watching the currently picked drop channel unless it goes offline, its campaign finishes/ends, another eligible campaign's deadline is at least this many minutes closer, or the in-progress drop can no longer complete before its campaign deadline. While the in-progress drop can still finish in time, the pick is held even past the margin. 0 disables stickiness (always switch to the soonest-expiring campaign).
     'drop_badge_catalog': True,
     'drop_badge_refresh_interval_hours': 1,
     'auto_mine_badge_drops': False,
