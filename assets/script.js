@@ -188,7 +188,7 @@ function switchDashboardTab(tabName) {
     $('#tab-config').toggleClass('is-link', isConfig);
     $('#tab-logs').toggleClass('is-link', isLogs);
 
-    localStorage.setItem('dashboardTab', tabName);
+    safeStorage.setItem('dashboardTab', tabName);
 
     if (isConfig && !configLoaded) loadWebConfig();
     if (isLogs && !logsLoaded) startLogPolling();
@@ -209,15 +209,15 @@ startDate.setDate(startDate.getDate() - daysAgo);
 var endDate = new Date();
 
 $(document).ready(function () {
-    var savedDarkMode = localStorage.getItem('dark-mode');
+    var savedDarkMode = safeStorage.getItem('dark-mode');
     if (savedDarkMode === null) {
         savedDarkMode = 'true';
-        localStorage.setItem('dark-mode', savedDarkMode);
+        safeStorage.setItem('dark-mode', savedDarkMode);
     }
     $('#dark-mode').prop('checked', savedDarkMode === 'true');
     $('#dark-theme').prop('disabled', savedDarkMode !== 'true');
 
-    var savedDashboardTab = localStorage.getItem('dashboardTab') || 'points';
+    var savedDashboardTab = safeStorage.getItem('dashboardTab') || 'points';
     // A caller embedding this page (e.g. the Windows desktop shell's first-run
     // Config view) can force the initial tab via a URL hash, bypassing
     // whatever was last saved for this browser profile.
@@ -225,7 +225,7 @@ $(document).ready(function () {
     if (['points', 'drops', 'config', 'logs'].includes(requestedTab)) {
         savedDashboardTab = requestedTab;
     }
-    dropsFilter = localStorage.getItem('dropsFilter') || 'active';
+    dropsFilter = safeStorage.getItem('dropsFilter') || 'active';
     $('#drops-filter').val(dropsFilter);
 
     $('#auto-update-log').click(() => {
@@ -238,7 +238,7 @@ $(document).ready(function () {
     });
 
     // Retrieve the saved header visibility preference from localStorage
-    var headerVisibility = localStorage.getItem('headerVisibility');
+    var headerVisibility = safeStorage.getItem('headerVisibility');
 
     // Set the initial header visibility based on the saved preference or default to 'visible'
     if (headerVisibility === 'hidden') {
@@ -257,12 +257,12 @@ $(document).ready(function () {
             $('#header').show();
             $('body').removeClass('header-hidden');
             // Save the header visibility preference as 'visible' in localStorage
-            localStorage.setItem('headerVisibility', 'visible');
+            safeStorage.setItem('headerVisibility', 'visible');
         } else {
             $('#header').hide();
             $('body').addClass('header-hidden');
             // Save the header visibility preference as 'hidden' in localStorage
-            localStorage.setItem('headerVisibility', 'hidden');
+            safeStorage.setItem('headerVisibility', 'hidden');
         }
     });
 
@@ -273,23 +273,23 @@ $(document).ready(function () {
         switchDashboardTab(savedDashboardTab);
     });
 
-    if (!localStorage.getItem("annotations")) localStorage.setItem("annotations", true);
-    if (!localStorage.getItem("sort-by")) localStorage.setItem("sort-by", "Name ascending");
+    if (!safeStorage.getItem("annotations")) safeStorage.setItem("annotations", true);
+    if (!safeStorage.getItem("sort-by")) safeStorage.setItem("sort-by", "Name ascending");
 
     // Restore settings from localStorage on page load
-    $('#annotations').prop("checked", localStorage.getItem("annotations") === "true");
+    $('#annotations').prop("checked", safeStorage.getItem("annotations") === "true");
 
     // Handle the annotation toggle click event
     $('#annotations').click(() => {
         var isChecked = $('#annotations').prop("checked");
-        localStorage.setItem("annotations", isChecked);
+        safeStorage.setItem("annotations", isChecked);
         updateAnnotations();
     });
 
     // Handle the dark mode toggle click event
     $('#dark-mode').click(() => {
         var isChecked = $('#dark-mode').prop("checked");
-        localStorage.setItem("dark-mode", isChecked);
+        safeStorage.setItem("dark-mode", isChecked);
         toggleDarkMode();
     });
 
@@ -323,7 +323,7 @@ $(document).ready(function () {
         if (event.key === 'Escape') closeAnalyticsDeleteModal();
     });
 
-    sortBy = localStorage.getItem("sort-by");
+    sortBy = safeStorage.getItem("sort-by");
     if (sortBy.includes("Points")) sortField = 'points';
     else if (sortBy.includes("Last activity")) sortField = 'last_activity';
     else sortField = 'name';
@@ -377,7 +377,7 @@ function changeStreamer(streamer, index) {
         currentStreamer = null;
         pointSeries = [];
         annotations = [];
-        localStorage.removeItem("selectedStreamer");
+        safeStorage.removeItem("selectedStreamer");
         updateStreamerDeleteControls();
         options.title.text = 'Channel points (dates are displayed in UTC)';
         renderPointsChart();
@@ -396,7 +396,7 @@ function changeStreamer(streamer, index) {
     }
 
     // Save the selected streamer in localStorage
-    localStorage.setItem("selectedStreamer", currentStreamer);
+    safeStorage.setItem("selectedStreamer", currentStreamer);
 
     getStreamerData(streamer);
 }
@@ -451,15 +451,15 @@ function getStreamers() {
         if (streamersList.length === 0) streamerDeleteSelectionMode = false;
 
         // Restore the selected streamer from localStorage on page load
-        var selectedStreamer = localStorage.getItem("selectedStreamer");
+        var selectedStreamer = safeStorage.getItem("selectedStreamer");
 
         if (selectedStreamer && streamersList.some(streamer => streamer.name === selectedStreamer)) {
             currentStreamer = selectedStreamer;
         } else {
             // If no selected streamer is found, default to the first streamer in the list
             currentStreamer = streamersList.length > 0 ? streamersList[0].name : null;
-            if (currentStreamer) localStorage.setItem("selectedStreamer", currentStreamer);
-            else localStorage.removeItem("selectedStreamer");
+            if (currentStreamer) safeStorage.setItem("selectedStreamer", currentStreamer);
+            else safeStorage.removeItem("selectedStreamer");
         }
 
         // Ensure the selected streamer is still active and scrolled into view
@@ -477,7 +477,7 @@ function renderStreamers() {
     $("#streamers-list").empty();
     streamersList.forEach((streamer, index) => {
         var isActive = currentStreamer === streamer.name;
-        if (!isActive && localStorage.getItem("selectedStreamer") === null && index === 0) {
+        if (!isActive && safeStorage.getItem("selectedStreamer") === null && index === 0) {
             isActive = true;
             currentStreamer = streamer.name;
         }
@@ -645,7 +645,7 @@ function confirmStreamerAnalyticsDeletion() {
                 streamerRefreshTimeout = null;
             }
             streamerDataRequest++;
-            localStorage.removeItem("selectedStreamer");
+            safeStorage.removeItem("selectedStreamer");
             currentStreamer = null;
         }
 
@@ -682,7 +682,7 @@ function changeSortBy(option) {
     sortStreamers();
     renderStreamers();
     $('#sorting-by').text(sortBy);
-    localStorage.setItem("sort-by", sortBy);
+    safeStorage.setItem("sort-by", sortBy);
 }
 
 function updateAnnotations() {
@@ -968,7 +968,7 @@ function getVisibleDropCategories() {
 function changeDropsFilter(value) {
     dropsFilter = value;
     dropsPage = 1;
-    localStorage.setItem('dropsFilter', value);
+    safeStorage.setItem('dropsFilter', value);
     renderDropCategoryList();
     renderDropRows();
 }
@@ -1019,7 +1019,7 @@ function normalizeDropsData(response) {
 function changeDropCategory(category) {
     currentDropCategory = category;
     dropsPage = 1;
-    localStorage.setItem('selectedDropCategory', category);
+    safeStorage.setItem('selectedDropCategory', category);
     renderDropCategoryList();
     renderDropRows();
 }
@@ -1173,7 +1173,7 @@ function renderDropRows() {
 function renderDropsByCategory(response) {
     dropsState = normalizeDropsData(response);
 
-    var savedDropCategory = localStorage.getItem('selectedDropCategory');
+    var savedDropCategory = safeStorage.getItem('selectedDropCategory');
     if (savedDropCategory && dropsState.categories[savedDropCategory]) {
         currentDropCategory = savedDropCategory;
     }

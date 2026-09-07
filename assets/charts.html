@@ -21,7 +21,37 @@
 
     <link id="dark-theme" href="{{url_for('static', filename='dark-theme.css', v=assetVersion)}}" rel="stylesheet" />
     <script>
-        if (localStorage.getItem('dark-mode') === 'false') {
+        // Wrapped so a blocked/restricted localStorage (e.g. third-party
+        // storage restrictions inside the Windows desktop shell's embedded
+        // iframe, whose top-level document is a different origin than this
+        // page) can't throw and silently abort every later script on the
+        // page - it falls back to an in-memory stand-in instead, so saved
+        // preferences just don't survive a reload in that one context
+        // rather than breaking the whole dashboard. Defined here, before
+        // script.js, so both can share it.
+        var safeStorage = (function () {
+            try {
+                var testKey = '__tcpm_storage_test__';
+                window.localStorage.setItem(testKey, '1');
+                window.localStorage.removeItem(testKey);
+                return window.localStorage;
+            } catch (error) {
+                var memory = {};
+                return {
+                    getItem: function (key) {
+                        return Object.prototype.hasOwnProperty.call(memory, key) ? memory[key] : null;
+                    },
+                    setItem: function (key, value) {
+                        memory[key] = String(value);
+                    },
+                    removeItem: function (key) {
+                        delete memory[key];
+                    },
+                };
+            }
+        })();
+
+        if (safeStorage.getItem('dark-mode') === 'false') {
             document.getElementById('dark-theme').disabled = true;
         }
     </script>
