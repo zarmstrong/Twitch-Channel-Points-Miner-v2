@@ -89,11 +89,16 @@ def pause_for_first_run():
     after the desktop shell could not be opened."""
     if os.name != "nt":
         return
+    if sys.stdin is None:
+        # A --windowed/--noconsole build has no console and thus no stdin
+        # at all; input() raises RuntimeError("lost sys.stdin") immediately
+        # rather than EOFError in this case, so it must be checked first.
+        return
     try:
         input("Press Enter to close this window...")
     except EOFError:
-        # A redirected, non-interactive, or console-less (windowed build)
-        # launch may not have stdin.
+        # A redirected or otherwise non-interactive launch may still have
+        # a stdin object that simply has nothing to read.
         pass
 
 

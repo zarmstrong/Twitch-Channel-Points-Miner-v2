@@ -67,7 +67,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-windows.txt
           python -m pip install validators==0.22.0 pyinstaller==6.21.0
 
       - name: Build Windows executable
