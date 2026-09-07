@@ -185,7 +185,10 @@ end;
 
 procedure InitializeWizard;
 begin
-  Randomize;
+  // No Randomize/RandSeed call needed (and neither exists in Pascal
+  // Script): Inno Setup's built-in Random() is backed by its own
+  // cryptographically strong RNG (TStrongRandom), not the Delphi RTL's
+  // seed-dependent one, so it's already unpredictable per run.
   ConfigurePage := CreateInputQueryPage(wpSelectTasks,
     'Configure the miner',
     'Optionally prefill the initial configuration',
