@@ -285,6 +285,7 @@ class TwitchChannelPointsMiner:
         "disable_at_in_nickname",
         "streams_watched",
         "streamer_source_priority",
+        "configured_source_priority",
         "priority",
         "streamers",
         "events_predictions",
@@ -336,8 +337,7 @@ class TwitchChannelPointsMiner:
         streamer_settings: StreamerSettings = StreamerSettings(),
         streams_watched: int = 2,
         gql: AttemptStrategy | GQLFactory | None = None,
-        streamer_source_priority: list
-        | tuple = (
+        streamer_source_priority: list | tuple = (
             StreamerSource.STREAMERS,
             StreamerSource.FOLLOWERS,
             StreamerSource.CATEGORIES,
@@ -368,6 +368,11 @@ class TwitchChannelPointsMiner:
         Settings.disable_at_in_nickname = disable_at_in_nickname
 
         self.streams_watched = _normalize_streams_watched(streams_watched)
+        self.configured_source_priority = (
+            list(streamer_source_priority)
+            if isinstance(streamer_source_priority, (list, tuple))
+            else None
+        )
         self.streamer_source_priority = _normalize_streamer_source_priority(
             streamer_source_priority
         )
@@ -845,10 +850,14 @@ class TwitchChannelPointsMiner:
                     else Streamer(
                         username,
                         settings=(
-                            StreamerSettings(chat=category_chat)
+                            StreamerSettings(chat=category_chat, watch_streak=False)
                             if is_category_streamer is True
                             and category_chat is not None
-                            else None
+                            else (
+                                StreamerSettings(watch_streak=False)
+                                if is_category_streamer is True
+                                else None
+                            )
                         ),
                         from_followers=is_follower_streamer,
                         from_category=is_category_streamer,
@@ -869,6 +878,16 @@ class TwitchChannelPointsMiner:
                 streamer.settings.bet = set_default_settings(
                     streamer.settings.bet, Settings.streamer_settings.bet
                 )
+                if (
+                    streamer.explicitly_configured is False
+                    and streamer.from_followers is True
+                    and self._followers_source_enabled() is False
+                ):
+                    # Watch streaks are only for explicitly configured streamers
+                    # and followed channels while the Followed channels source
+                    # is enabled - discovered category/wildcard/badge streamers
+                    # are created with watch_streak=False at their build sites.
+                    streamer.settings.watch_streak = False
                 if streamer.settings.chat != ChatPresence.NEVER:
                     streamer.irc_chat = ThreadChat(
                         self.username,
@@ -1442,6 +1461,7 @@ class TwitchChannelPointsMiner:
                         settings=StreamerSettings(
                             claim_drops=True,
                             chat=self.badge_drop_category_chat,
+                            watch_streak=False,
                         ),
                         from_category=True,
                         from_badge_campaign=True,
@@ -1668,9 +1688,9 @@ class TwitchChannelPointsMiner:
                 streamer = Streamer(
                     username,
                     settings=(
-                        StreamerSettings(chat=category_chat)
+                        StreamerSettings(chat=category_chat, watch_streak=False)
                         if category_chat is not None
-                        else None
+                        else StreamerSettings(watch_streak=False)
                     ),
                     from_category=True,
                     from_wildcard_category=wildcard,
@@ -1906,6 +1926,17 @@ class TwitchChannelPointsMiner:
                 )
             self.streamers[:] = retained
             self.original_streamers[:] = retained_baselines
+
+    def _followers_source_enabled(self):
+        # The Followed channels source is enabled when the option is not
+        # configured at all (the default order includes FOLLOWERS) or when the
+        # user's configured streamer_source_priority still lists it - matching
+        # the config editor's followers toggle. The normalized
+        # streamer_source_priority always contains every source, so it cannot
+        # be used to detect a removal.
+        if not self.configured_source_priority:
+            return True
+        return StreamerSource.FOLLOWERS in self.configured_source_priority
 
     def _add_streamers(self, streamers):
         existing = {streamer.username for streamer in self.streamers}
