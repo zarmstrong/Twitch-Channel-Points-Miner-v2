@@ -49,6 +49,174 @@ def _fake_launch_shell_recording(calls, extract=lambda dashboard_info, initial_t
 _REAL_USERNAME = "a_real_twitch_user"
 
 
+def test_build_install_mode_reads_bundled_marker(tmp_path, monkeypatch):
+    marker = tmp_path / "install_mode.txt"
+    marker.write_text("standard\n", encoding="utf-8")
+    monkeypatch.setattr(windows_launcher, "bundled_file", lambda _name: marker)
+
+    assert windows_launcher._build_install_mode() == "standard"
+
+
+def test_build_install_mode_defaults_to_portable_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        windows_launcher, "bundled_file", lambda _name: tmp_path / "does-not-exist.txt"
+    )
+
+    assert windows_launcher._build_install_mode() == "portable"
+
+
+def test_is_standard_build_true_only_for_standard_marker(tmp_path, monkeypatch):
+    marker = tmp_path / "install_mode.txt"
+    monkeypatch.setattr(windows_launcher, "bundled_file", lambda _name: marker)
+
+    marker.write_text("standard", encoding="utf-8")
+    assert windows_launcher._is_standard_build() is True
+
+    marker.write_text("portable", encoding="utf-8")
+    assert windows_launcher._is_standard_build() is False
+
+
+def test_standard_application_directory_uses_localappdata(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+
+    result = windows_launcher._standard_application_directory()
+
+    assert result == tmp_path / "TwitchChannelPointsMiner"
+
+
+def test_standard_application_directory_falls_back_without_localappdata(monkeypatch):
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    result = windows_launcher._standard_application_directory()
+
+    assert result == Path.home() / "AppData" / "Local" / "TwitchChannelPointsMiner"
+
+
+def test_config_root_directory_is_exe_dir_for_portable_build(tmp_path, monkeypatch):
+    monkeypatch.setattr(windows_launcher, "_is_standard_build", lambda: False)
+
+    assert windows_launcher.config_root_directory(tmp_path) == tmp_path
+
+
+def test_config_root_directory_is_standard_dir_for_standard_build(tmp_path, monkeypatch):
+    monkeypatch.setattr(windows_launcher, "_is_standard_build", lambda: True)
+    monkeypatch.setattr(
+        windows_launcher, "_standard_application_directory", lambda: tmp_path / "AppData"
+    )
+
+    assert windows_launcher.config_root_directory(tmp_path / "exe") == tmp_path / "AppData"
+
+
+def _write_legacy_data(exe_dir):
+    (exe_dir / "config").mkdir(parents=True)
+    (exe_dir / "config" / "config.py").write_text("MINER_CONFIG = {}\n", encoding="utf-8")
+    (exe_dir / "cookies").mkdir()
+    (exe_dir / "cookies" / "someone.json").write_text("[]", encoding="utf-8")
+    (exe_dir / "analytics").mkdir()
+    (exe_dir / "analytics" / "someone.json").write_text("{}", encoding="utf-8")
+    (exe_dir / "logs").mkdir()
+    (exe_dir / "logs" / "old.log").write_text("stale log content\n", encoding="utf-8")
+
+
+def test_migrate_legacy_windows_data_does_nothing_without_a_legacy_config(tmp_path):
+    exe_dir = tmp_path / "exe"
+    exe_dir.mkdir()
+    standard_dir = tmp_path / "AppData"
+
+    result = windows_launcher._migrate_legacy_windows_data(exe_dir, standard_dir)
+
+    assert result is None
+    assert not (exe_dir / "config-legacy").exists()
+    assert not standard_dir.exists()
+
+
+def test_migrate_legacy_windows_data_moves_and_carries_forward(tmp_path):
+    exe_dir = tmp_path / "exe"
+    exe_dir.mkdir()
+    _write_legacy_data(exe_dir)
+    standard_dir = tmp_path / "AppData"
+
+    result = windows_launcher._migrate_legacy_windows_data(exe_dir, standard_dir)
+
+    assert result is not None
+    assert str(standard_dir) in result
+    assert str(exe_dir / "config-legacy") in result
+
+    # Archived: nothing lost, including logs.
+    assert (exe_dir / "config-legacy" / "config" / "config.py").is_file()
+    assert (exe_dir / "config-legacy" / "cookies" / "someone.json").is_file()
+    assert (exe_dir / "config-legacy" / "analytics" / "someone.json").is_file()
+    assert (exe_dir / "config-legacy" / "logs" / "old.log").is_file()
+    assert (exe_dir / "config-legacy" / ".migrated").is_file()
+
+    # Carried forward: config, cookies, analytics.
+    assert (standard_dir / "config" / "config.py").is_file()
+    assert (standard_dir / "cookies" / "someone.json").is_file()
+    assert (standard_dir / "analytics" / "someone.json").is_file()
+
+    # Not carried forward: old logs stay archived-only, so they're never
+    # duplicated into a live folder nothing will ever clean up.
+    assert not (standard_dir / "logs").exists()
+
+    # Nothing left beside the exe - it was moved, not copied.
+    assert not (exe_dir / "config").exists()
+    assert not (exe_dir / "cookies").exists()
+    assert not (exe_dir / "analytics").exists()
+    assert not (exe_dir / "logs").exists()
+
+
+def test_migrate_legacy_windows_data_is_idempotent(tmp_path):
+    exe_dir = tmp_path / "exe"
+    exe_dir.mkdir()
+    _write_legacy_data(exe_dir)
+    standard_dir = tmp_path / "AppData"
+    windows_launcher._migrate_legacy_windows_data(exe_dir, standard_dir)
+
+    # A second call must be a pure no-op - re-running this against the
+    # fresh standard-location data (rather than the real legacy data, which
+    # no longer exists at its old path) would be actively wrong.
+    canary = standard_dir / "config" / "config.py"
+    canary.write_text("edited after migration\n", encoding="utf-8")
+
+    result = windows_launcher._migrate_legacy_windows_data(exe_dir, standard_dir)
+
+    assert result is None
+    assert canary.read_text(encoding="utf-8") == "edited after migration\n"
+
+
+def test_migrate_legacy_windows_data_handles_partial_legacy_data(tmp_path):
+    exe_dir = tmp_path / "exe"
+    exe_dir.mkdir()
+    (exe_dir / "config").mkdir()
+    (exe_dir / "config" / "config.py").write_text("MINER_CONFIG = {}\n", encoding="utf-8")
+    # No cookies/analytics/logs folders at all - e.g. never logged in yet.
+    standard_dir = tmp_path / "AppData"
+
+    result = windows_launcher._migrate_legacy_windows_data(exe_dir, standard_dir)
+
+    assert result is not None
+    assert (standard_dir / "config" / "config.py").is_file()
+    assert not (standard_dir / "cookies").exists()
+
+
+def test_show_migration_notice_uses_native_message_box_on_windows(monkeypatch):
+    calls = []
+
+    class FakeUser32:
+        def MessageBoxW(self, hwnd, text, caption, flags):
+            calls.append((hwnd, text, caption, flags))
+
+    class FakeWindll:
+        user32 = FakeUser32()
+
+    monkeypatch.setattr(windows_launcher.os, "name", "nt")
+    monkeypatch.setattr(windows_launcher.ctypes, "windll", FakeWindll(), raising=False)
+
+    windows_launcher._show_migration_notice("moved!")
+
+    assert calls == [(0, "moved!", "Twitch Channel Points Miner", 0x40)]
+
+
 def test_prepare_config_copies_template_once(tmp_path, monkeypatch):
     template = tmp_path / "template.py"
     template.write_text("MINER_CONFIG = {}\n", encoding="utf-8")
@@ -141,6 +309,91 @@ def test_main_sets_a_fresh_shell_bypass_token_before_launching_the_shell(
 
     assert len(tokens_seen) == 1
     assert tokens_seen[0]  # non-empty: a real per-launch secret was set
+
+
+def _write_real_config(config_dir):
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.py").write_text(
+        f"MINER_CONFIG = {{'username': {_REAL_USERNAME!r}}}\n"
+        "STREAMERS = []\n"
+        "MINE_CONFIG = {}\n"
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+
+
+def test_main_creates_a_brand_new_standard_appdata_directory(tmp_path, monkeypatch):
+    # A standard build's AppData folder may not exist at all on a truly
+    # fresh install - os.chdir() requires it to exist first, unlike a
+    # portable build's exe_dir, which always exists trivially already (the
+    # exe is running from there).
+    exe_dir = tmp_path / "exe"
+    exe_dir.mkdir()
+    standard_dir = tmp_path / "AppData" / "TwitchChannelPointsMiner"
+    assert not standard_dir.exists()
+
+    monkeypatch.setattr(windows_launcher, "application_directory", lambda: exe_dir)
+    monkeypatch.setattr(windows_launcher, "_is_standard_build", lambda: True)
+    monkeypatch.setattr(
+        windows_launcher, "_standard_application_directory", lambda: standard_dir
+    )
+    monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(windows_launcher, "runner_main", lambda argv: 0)
+    monkeypatch.setattr(windows_launcher, "launch_shell", lambda *args, **kwargs: None)
+    monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
+
+    assert windows_launcher.main() == 0
+
+    assert standard_dir.is_dir()
+    assert (standard_dir / "config" / "config.py").is_file()
+
+
+def test_main_migrates_legacy_data_and_shows_notice_for_standard_build(
+    tmp_path, monkeypatch
+):
+    exe_dir = tmp_path / "exe"
+    _write_real_config(exe_dir / "config")
+    standard_dir = tmp_path / "AppData" / "TwitchChannelPointsMiner"
+
+    monkeypatch.setattr(windows_launcher, "application_directory", lambda: exe_dir)
+    monkeypatch.setattr(windows_launcher, "_is_standard_build", lambda: True)
+    monkeypatch.setattr(
+        windows_launcher, "_standard_application_directory", lambda: standard_dir
+    )
+    monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(windows_launcher, "runner_main", lambda argv: 0)
+    monkeypatch.setattr(windows_launcher, "launch_shell", lambda *args, **kwargs: None)
+    monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
+    notices = []
+    monkeypatch.setattr(windows_launcher, "_show_migration_notice", notices.append)
+
+    assert windows_launcher.main() == 0
+
+    assert (standard_dir / "config" / "config.py").is_file()
+    assert (exe_dir / "config-legacy" / ".migrated").is_file()
+    assert len(notices) == 1
+
+
+def test_main_never_migrates_for_a_portable_build(tmp_path, monkeypatch):
+    exe_dir = tmp_path / "exe"
+    _write_real_config(exe_dir / "config")
+
+    monkeypatch.setattr(windows_launcher, "application_directory", lambda: exe_dir)
+    monkeypatch.setattr(windows_launcher, "_is_standard_build", lambda: False)
+    monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(windows_launcher, "runner_main", lambda argv: 0)
+    monkeypatch.setattr(windows_launcher, "launch_shell", lambda *args, **kwargs: None)
+    monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
+    notices = []
+    monkeypatch.setattr(windows_launcher, "_show_migration_notice", notices.append)
+
+    assert windows_launcher.main() == 0
+
+    assert not (exe_dir / "config-legacy").exists()
+    assert notices == []
 
 
 def test_main_starts_miner_thread_and_launches_shell_when_interactive(
@@ -962,6 +1215,24 @@ def test_window_api_open_in_browser_noop_when_dashboard_unavailable(monkeypatch)
     )
 
     api.open_in_browser()
+
+
+def test_window_api_open_twitch_activate_opens_the_activation_page(monkeypatch):
+    opened = []
+    monkeypatch.setattr(windows_launcher.webbrowser, "open", lambda url: opened.append(url))
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=None,
+        needs_username=False,
+        start_mining=lambda: None,
+        logs_dir=None,
+    )
+
+    api.open_twitch_activate()
+
+    assert opened == ["https://www.twitch.tv/activate"]
 
 
 def test_window_api_enable_dashboard_delegates_to_shared_helper(tmp_path, monkeypatch):

@@ -177,10 +177,103 @@
             color: #ff8f8f;
             min-height: 1.2em;
         }
+
+        #twitch-login-panel {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.55);
+            z-index: 20;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #twitch-login-panel.visible {
+            display: flex;
+        }
+
+        .twitch-login-card {
+            position: relative;
+            background: #1e1f29;
+            border: 1px solid #3a3c50;
+            border-radius: 8px;
+            padding: 28px 32px;
+            max-width: 380px;
+            text-align: center;
+            line-height: 1.5;
+        }
+
+        #twitch-login-dismiss {
+            position: absolute;
+            top: 6px;
+            right: 10px;
+            background: transparent;
+            border: none;
+            color: #9aa0c0;
+            font-size: 20px;
+            line-height: 1;
+            cursor: pointer;
+        }
+
+        #twitch-login-code {
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 28px;
+            font-weight: bold;
+            letter-spacing: 4px;
+            background: #14151d;
+            border-radius: 4px;
+            padding: 12px;
+            margin: 14px 0;
+        }
+
+        .twitch-login-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: center;
+        }
+
+        .twitch-login-actions button {
+            background: #f9826c;
+            color: #1e1f29;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: bold;
+        }
+
+        #twitch-login-expiry {
+            margin-top: 10px;
+            color: #9aa0c0;
+            font-size: 12px;
+        }
+
+        #twitch-login-copy-status {
+            margin-top: 4px;
+            color: #9aa0c0;
+            font-size: 12px;
+            min-height: 1.2em;
+        }
     </style>
 </head>
 
 <body>
+    <div id="twitch-login-panel">
+        <div class="twitch-login-card">
+            <button id="twitch-login-dismiss" type="button" aria-label="Dismiss">&times;</button>
+            <h2>Sign in to Twitch</h2>
+            <p>Open the activation page and enter this code to finish signing in.</p>
+            <div id="twitch-login-code"></div>
+            <div class="twitch-login-actions">
+                <button id="twitch-login-copy" type="button">Copy code</button>
+                <button id="twitch-login-open" type="button">Open twitch.tv/activate</button>
+            </div>
+            <p id="twitch-login-expiry"></p>
+            <p id="twitch-login-copy-status"></p>
+        </div>
+    </div>
+
     <div id="setup-panel">
         <div class="setup-card">
             <h2>Welcome!</h2>
@@ -271,6 +364,71 @@
             });
         });
 
+        // Twitch's device-code login flow only ever surfaces through the
+        // miner's own log lines (TwitchLogin.py has no other hook for this,
+        // and it's shared with the Docker/Linux deployments - adding one
+        // there just for the Windows shell isn't worth coupling core login
+        // logic to an optional GUI concern). The Console tab already
+        // receives every line, so this scans that same text for the
+        // handful of known, stable substrings instead.
+        var consoleScanTail = '';
+        var lastShownTwitchCode = null;
+
+        function showTwitchLoginPanel(code, minutes) {
+            document.getElementById('twitch-login-code').textContent = code;
+            document.getElementById('twitch-login-expiry').textContent = minutes
+                ? 'This code expires in ' + minutes + ' minutes.'
+                : '';
+            document.getElementById('twitch-login-copy-status').textContent = '';
+            document.getElementById('twitch-login-panel').classList.add('visible');
+        }
+
+        function hideTwitchLoginPanel() {
+            document.getElementById('twitch-login-panel').classList.remove('visible');
+        }
+
+        function scanConsoleForTwitchLogin(newText) {
+            if (!newText) return;
+            var combined = consoleScanTail + newText;
+
+            var codeMatch = combined.match(/and enter this code:\s*([A-Za-z0-9]+)/);
+            if (codeMatch && codeMatch[1] !== lastShownTwitchCode) {
+                var minutesMatch = combined.match(/expire in (\d+) minutes?/);
+                showTwitchLoginPanel(codeMatch[1], minutesMatch ? minutesMatch[1] : null);
+                lastShownTwitchCode = codeMatch[1];
+            }
+
+            if (combined.indexOf('Saving cookies to your computer') !== -1) {
+                hideTwitchLoginPanel();
+            }
+
+            // A small rolling tail carried across polls, in case a line is
+            // ever split right at a poll boundary - a rare-case safety net
+            // (polls are 750ms apart and log lines are written whole), not
+            // the primary matching path.
+            consoleScanTail = combined.slice(-200);
+        }
+
+        document.getElementById('twitch-login-dismiss').addEventListener('click', hideTwitchLoginPanel);
+
+        document.getElementById('twitch-login-open').addEventListener('click', function () {
+            if (window.pywebview) window.pywebview.api.open_twitch_activate();
+        });
+
+        document.getElementById('twitch-login-copy').addEventListener('click', function () {
+            var code = document.getElementById('twitch-login-code').textContent;
+            var status = document.getElementById('twitch-login-copy-status');
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(code).then(function () {
+                    status.textContent = 'Copied!';
+                }).catch(function () {
+                    status.textContent = 'Could not copy - select and copy manually.';
+                });
+            } else {
+                status.textContent = 'Select and copy the code manually.';
+            }
+        });
+
         function pollConsole() {
             if (!window.pywebview) {
                 setTimeout(pollConsole, 300);
@@ -286,6 +444,7 @@
                     });
                     content.scrollTop = content.scrollHeight;
                     lastConsoleSeq = result.next_seq;
+                    scanConsoleForTwitchLogin(result.lines.join(''));
                 }
             }).catch(function () {
                 // Transient bridge hiccup; the next poll will catch up.

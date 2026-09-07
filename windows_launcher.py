@@ -80,6 +80,41 @@ def bundled_file(name):
     return bundle_directory / name
 
 
+def _build_install_mode():
+    """Returns "standard" or "portable", baked into the bundle at build time
+    by build_windows.bat's two separate invocations - not inferred from the
+    exe's own filename (trivially renamed by the end user, which would
+    otherwise silently flip behavior) or anything else decided after the
+    fact. Missing or unreadable (always true for a source checkout, which
+    has no bundle at all) defaults to "portable": the long-standing, safe
+    behavior of keeping everything beside the script/exe.
+    """
+    try:
+        return bundled_file("install_mode.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "portable"
+
+
+def _is_standard_build():
+    return _build_install_mode() == "standard"
+
+
+def _standard_application_directory():
+    """Per-user Windows data directory for a "standard" build - deliberately
+    separate from wherever the exe binary itself lives, so installing,
+    upgrading, or uninstalling the app never touches configuration, cookies,
+    analytics, or logs."""
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    return Path(base) / "TwitchChannelPointsMiner"
+
+
+def config_root_directory(exe_dir):
+    """Where config/cookies/analytics/logs live for this run."""
+    if _is_standard_build():
+        return _standard_application_directory()
+    return exe_dir
+
+
 def prepare_config(application_dir):
     """Create the external configuration template on first launch."""
     config_dir = application_dir / "config"
@@ -115,21 +150,92 @@ def pause_for_first_run():
         pass
 
 
-def _show_fatal_error_message(text):
-    """Best-effort native fallback for when nothing else can reach the user.
-
-    A --windowed build has no console, and if the desktop shell itself never
-    opened, there is no window either - a native message box is the only
-    remaining way to avoid failing completely silently.
+def _message_box(text, title, icon_flag):
+    """Best-effort native message box for when nothing else can reach the
+    user - a --windowed build has no console, and this may run before the
+    desktop shell window exists (or after it failed to open) either way.
     """
     if os.name != "nt":
         return
     try:
-        ctypes.windll.user32.MessageBoxW(
-            0, text, "Twitch Channel Points Miner - Error", 0x10  # MB_ICONERROR
-        )
+        ctypes.windll.user32.MessageBoxW(0, text, title, icon_flag)
     except Exception:
         pass
+
+
+def _show_fatal_error_message(text):
+    _message_box(text, "Twitch Channel Points Miner - Error", 0x10)  # MB_ICONERROR
+
+
+def _show_migration_notice(text):
+    _message_box(text, "Twitch Channel Points Miner", 0x40)  # MB_ICONINFORMATION
+
+
+# Carried forward into the new standard location - the app needs these to
+# keep working exactly where the user left off (same account, cookies,
+# watch/points history).
+_LEGACY_DIRS_CARRY_FORWARD = ("config", "cookies", "analytics")
+# Archived only, never copied forward: old logs aren't part of continuing to
+# run and are never rotated/cleaned by anything once they're just sitting in
+# a copy - carrying them into the live logs folder would mean an old,
+# unbounded pile the app's normal log management never touches.
+_LEGACY_DIRS_ARCHIVE_ONLY = ("logs",)
+
+
+def _migrate_legacy_windows_data(exe_dir, standard_dir):
+    """One-time migration for a "standard" build that finds data from before
+    this feature existed, back when everything lived beside the exe (the
+    only behavior a portable build, or any older version, has ever had).
+
+    Moves each old data folder into <exe_dir>/config-legacy/<name> (so
+    nothing is lost regardless of what happens next), then copies the ones
+    the app actually needs going forward into the new standard location -
+    old logs are archived but deliberately not carried into the live logs
+    folder (see _LEGACY_DIRS_ARCHIVE_ONLY).
+
+    Gated on a marker *inside* the archive folder (config-legacy/.migrated),
+    not on whether a legacy config.py still exists - once archived,
+    config.py no longer exists at its old path at all, so re-checking that
+    on a later run would look identical to "nothing to migrate", and this
+    must not run twice regardless (a second run would archive the fresh
+    standard-location data instead of the real legacy data).
+
+    Returns None if there was nothing to do, or a message describing what
+    happened (success or partial failure) for a one-time notice to the user.
+    """
+    legacy_root = exe_dir / "config-legacy"
+    if (legacy_root / ".migrated").is_file():
+        return None
+    if not (exe_dir / "config" / "config.py").is_file():
+        return None  # nothing to migrate - a fresh standard install
+
+    try:
+        legacy_root.mkdir(parents=True, exist_ok=True)
+        for name in _LEGACY_DIRS_CARRY_FORWARD + _LEGACY_DIRS_ARCHIVE_ONLY:
+            source = exe_dir / name
+            if not source.is_dir():
+                continue
+            archived = legacy_root / name
+            if not archived.exists():
+                shutil.move(str(source), str(archived))
+            if name in _LEGACY_DIRS_CARRY_FORWARD:
+                destination = standard_dir / name
+                if archived.is_dir() and not destination.exists():
+                    shutil.copytree(archived, destination)
+        (legacy_root / ".migrated").touch()
+    except OSError as error:
+        return (
+            "Could not fully move your existing configuration to its new "
+            f"location ({error}).\n\nYour original files are safe at:\n"
+            f"{legacy_root}"
+        )
+
+    return (
+        "Your configuration, cookies, and analytics were moved to:\n"
+        f"{standard_dir}\n\n"
+        "Your original files, including past logs, were kept, untouched, "
+        f"at:\n{legacy_root}"
+    )
 
 
 def _matches_template_defaults(source):
@@ -553,6 +659,9 @@ class WindowApi:
         if self._dashboard_info:
             webbrowser.open(_dashboard_url_with_bypass(self._dashboard_info["url"]))
 
+    def open_twitch_activate(self):
+        webbrowser.open("https://www.twitch.tv/activate")
+
     def enable_dashboard(self):
         success, message = _enable_dashboard_from_shell(self._config_path)
         return {"success": success, "message": message}
@@ -717,11 +826,26 @@ def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
 
-    application_dir = application_directory()
+    exe_dir = application_directory()
+    application_dir = config_root_directory(exe_dir)
+    # For a standard build this may be a brand-new per-user AppData folder
+    # that has never existed before (nothing else creates it up front, as
+    # exe_dir always trivially exists already) - os.chdir() below requires
+    # it to exist first.
+    application_dir.mkdir(parents=True, exist_ok=True)
     os.chdir(application_dir)
 
     console_buffer = ConsoleBuffer()
     install_console_capture(console_buffer)
+
+    # Always attempted for a standard build (never for portable, which has
+    # nothing to migrate to), regardless of whether this turns out to be an
+    # interactive launch - see the notice-display gating below.
+    migration_notice = (
+        _migrate_legacy_windows_data(exe_dir, application_dir)
+        if _is_standard_build()
+        else None
+    )
 
     config_dir, created = prepare_config(application_dir)
     config_path = config_dir / "config.py"
@@ -730,12 +854,16 @@ def main():
         "--config-dir",
         str(config_dir),
         "--legacy-runner",
-        str(application_dir / "run.py"),
+        str(exe_dir / "run.py"),
         *sys.argv[1:],
     ]
     # A scripted/automation invocation (e.g. `--convert-only`) should behave
-    # exactly as before: do the work and exit, with no desktop window.
+    # exactly as before: do the work and exit, with no desktop window - so
+    # the migration notice below (a blocking modal) must never show for one.
     interactive = "--convert-only" not in argv
+
+    if migration_notice and interactive:
+        _show_migration_notice(migration_notice)
 
     if created:
         print(f"Created {config_path}")

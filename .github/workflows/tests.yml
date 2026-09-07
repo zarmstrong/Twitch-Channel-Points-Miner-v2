@@ -49,9 +49,13 @@ jobs:
       - name: Run tests
         run: python -m pytest
 
-  windows_installer:
-    name: Windows installer
+  build_windows_exe:
+    name: Build Windows executable (${{ matrix.flavor }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [standard, portable]
 
     steps:
       - name: Checkout source
@@ -72,19 +76,50 @@ jobs:
 
       - name: Build Windows executable
         shell: cmd
-        run: build_windows.bat
+        run: build_windows.bat ${{ matrix.flavor }}
 
       - name: Smoke-test Windows executable
         shell: pwsh
+        env:
+          FLAVOR: ${{ matrix.flavor }}
         run: |
+          $exeName = if ($env:FLAVOR -eq "standard") { "TwitchChannelPointsMiner.exe" } else { "TwitchChannelPointsMiner-Portable.exe" }
           # --windowed is a GUI-subsystem exe, so a plain call here returns
           # before the process actually finishes and leaves $LASTEXITCODE
           # stale/empty; Start-Process -Wait is needed to block on it and
           # get its real exit code.
-          $proc = Start-Process -FilePath "dist\TwitchChannelPointsMiner.exe" -ArgumentList "--self-test" -Wait -PassThru
+          $proc = Start-Process -FilePath "dist\$exeName" -ArgumentList "--self-test" -Wait -PassThru
           if ($proc.ExitCode -ne 0) {
             throw "Smoke test failed (exit code $($proc.ExitCode)) - the built exe is missing a GUI dependency"
           }
+
+      - name: Upload built executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-exe-${{ matrix.flavor }}
+          path: dist/TwitchChannelPointsMiner*.exe
+          if-no-files-found: error
+
+  windows_installer:
+    name: Windows installer
+    needs: build_windows_exe
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Download standard executable
+        uses: actions/download-artifact@v8
+        with:
+          name: windows-exe-standard
+          path: dist
+
+      - name: Download portable executable
+        uses: actions/download-artifact@v8
+        with:
+          name: windows-exe-portable
+          path: dist
 
       - name: Build Windows installer
         shell: pwsh
@@ -110,5 +145,6 @@ jobs:
           name: windows-installer-${{ github.event.pull_request.number || github.run_number }}
           path: |
             dist/TwitchChannelPointsMiner.exe
+            dist/TwitchChannelPointsMiner-Portable.exe
             dist/TwitchChannelPointsMiner-0.0.0-pr${{ github.event.pull_request.number || github.run_number }}-Setup.exe
           if-no-files-found: error

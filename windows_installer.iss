@@ -36,7 +36,12 @@ Name: "enableanalytics"; Description: "Enable the analytics dashboard (recommend
 
 [Files]
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "config.example.py"; DestDir: "{app}\config"; DestName: "config.py"; Flags: onlyifdoesntexist; AfterInstall: CustomizeStarterConfig
+; This build of the exe is the "standard" flavor (see build_windows.bat and
+; windows_launcher.py's _is_standard_build()) - it keeps configuration,
+; cookies, analytics, and logs in the per-user AppData location below, kept
+; separate from {app} (the install directory) so installing, upgrading, or
+; uninstalling never touches user data.
+Source: "config.example.py"; DestDir: "{localappdata}\TwitchChannelPointsMiner\config"; DestName: "config.py"; Flags: onlyifdoesntexist; AfterInstall: CustomizeStarterConfig
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
@@ -113,7 +118,7 @@ var
   StartAt: Integer;
   EndAt: Integer;
 begin
-  ConfigPath := ExpandConstant('{app}\config\config.py');
+  ConfigPath := ExpandConstant('{localappdata}\TwitchChannelPointsMiner\config\config.py');
   if not LoadStringFromFile(ConfigPath, ConfigBytes) then
     Exit;
   ConfigText := String(ConfigBytes);

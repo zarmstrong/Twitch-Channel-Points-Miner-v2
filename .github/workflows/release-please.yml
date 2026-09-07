@@ -90,13 +90,15 @@ jobs:
       ref: ${{ needs.release_please.outputs.tag_name }}
     secrets: inherit
 
-  publish_windows_exe:
-    name: Publish Windows executable
+  build_windows_exe:
+    name: Build Windows executable (${{ matrix.flavor }})
     needs: release_please
     if: needs.release_please.outputs.release_created == 'true'
     runs-on: windows-latest
-    permissions:
-      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [standard, portable]
     steps:
       - name: Checkout released source
         uses: actions/checkout@v6
@@ -117,19 +119,54 @@ jobs:
 
       - name: Build Windows executable
         shell: cmd
-        run: build_windows.bat
+        run: build_windows.bat ${{ matrix.flavor }}
 
       - name: Smoke-test Windows executable
         shell: pwsh
+        env:
+          FLAVOR: ${{ matrix.flavor }}
         run: |
+          $exeName = if ($env:FLAVOR -eq "standard") { "TwitchChannelPointsMiner.exe" } else { "TwitchChannelPointsMiner-Portable.exe" }
           # --windowed is a GUI-subsystem exe, so a plain call here returns
           # before the process actually finishes and leaves $LASTEXITCODE
           # stale/empty; Start-Process -Wait is needed to block on it and
           # get its real exit code.
-          $proc = Start-Process -FilePath "dist\TwitchChannelPointsMiner.exe" -ArgumentList "--self-test" -Wait -PassThru
+          $proc = Start-Process -FilePath "dist\$exeName" -ArgumentList "--self-test" -Wait -PassThru
           if ($proc.ExitCode -ne 0) {
             throw "Smoke test failed (exit code $($proc.ExitCode)) - the built exe is missing a GUI dependency"
           }
+
+      - name: Upload built executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-exe-${{ matrix.flavor }}
+          path: dist/TwitchChannelPointsMiner*.exe
+          if-no-files-found: error
+
+  publish_windows_exe:
+    name: Publish Windows executable
+    needs: [release_please, build_windows_exe]
+    if: needs.release_please.outputs.release_created == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout released source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release_please.outputs.tag_name }}
+
+      - name: Download standard executable
+        uses: actions/download-artifact@v8
+        with:
+          name: windows-exe-standard
+          path: dist
+
+      - name: Download portable executable
+        uses: actions/download-artifact@v8
+        with:
+          name: windows-exe-portable
+          path: dist
 
       - name: Package executable zip
         id: package
@@ -138,8 +175,8 @@ jobs:
           RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
         run: |
           $version = $env:RELEASE_TAG -replace '^Twitch-Channel-Points-Miner-v2-', ''
-          $zipName = "TwitchChannelPointsMiner-$version.zip"
-          Compress-Archive -Path "dist/TwitchChannelPointsMiner.exe" -DestinationPath "dist/$zipName" -Force
+          $zipName = "TwitchChannelPointsMiner-Portable-$version.zip"
+          Compress-Archive -Path "dist/TwitchChannelPointsMiner-Portable.exe" -DestinationPath "dist/$zipName" -Force
           "zip_path=dist/$zipName" >> $env:GITHUB_OUTPUT
 
       - name: Build Windows installer
