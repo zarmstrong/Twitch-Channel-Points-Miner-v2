@@ -111,8 +111,12 @@ class Twitch(object):
         "category_campaign_deadlines",
         "last_category_drop_selection",
         "last_wildcard_category_drop_selection",
+        "last_drop_pick_streamer",
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
+        "prompt_claim_lock",
+        "prompt_claim_pass_lock",
+        "prompt_claim_last",
         "campaign_game_slugs",
         "available_badge_names",
         "drop_badge_rewards",
@@ -181,8 +185,12 @@ class Twitch(object):
         self.category_campaign_deadlines = {}
         self.last_category_drop_selection = None
         self.last_wildcard_category_drop_selection = None
+        self.last_drop_pick_streamer = None
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
+        self.prompt_claim_lock = Lock()
+        self.prompt_claim_pass_lock = Lock()
+        self.prompt_claim_last = {}
         self.campaign_game_slugs = {}
         self.available_badge_names = None
         self.drop_badge_rewards = []
@@ -1140,7 +1148,10 @@ class Twitch(object):
 
         # Twitch can briefly leave a completed campaign in the in-progress
         # collection before moving it to completedRewardCampaigns. All Drops
-        # being explicitly claimed is also authoritative completion evidence.
+        # being explicitly claimed is also authoritative completion evidence,
+        # as is every drop having already accrued its required watch time:
+        # claiming is an inventory call that does not need more watching, so a
+        # fully captured but not-yet-claimed campaign must not stay watchable.
         for campaign in inventory.get("dropCampaignsInProgress", []) or []:
             if not isinstance(campaign, dict):
                 continue
@@ -1151,12 +1162,25 @@ class Twitch(object):
             if all(
                 isinstance(drop, dict)
                 and isinstance(drop.get("self"), dict)
-                and drop["self"].get("isClaimed") is True
+                and self.__inventory_drop_is_done(drop)
                 for drop in drops
             ):
                 completed_ids.add(str(campaign_id))
 
         return completed_ids
+
+    @staticmethod
+    def __inventory_drop_is_done(drop: dict) -> bool:
+        drop_self = drop.get("self")
+        if not isinstance(drop_self, dict):
+            return False
+        if drop_self.get("isClaimed") is True:
+            return True
+        required_minutes = drop.get("requiredMinutesWatched") or 0
+        return (
+            required_minutes > 0
+            and (drop_self.get("currentMinutesWatched") or 0) >= required_minutes
+        )
 
     def __merge_campaign_inventory_progress(
         self, campaign: dict, inventory_campaign: dict
@@ -4146,6 +4170,16 @@ class Twitch(object):
                                                 campaign=campaign,
                                                 streamer_username=streamer.username,
                                             )
+                                            if (
+                                                last_saved_minutes
+                                                < drop.minutes_required
+                                                and drop.current_minutes_watched
+                                                >= drop.minutes_required
+                                            ):
+                                                self.__claim_completed_drop_promptly(
+                                                    drop,
+                                                    campaign,
+                                                )
 
                                     # We could add .has_preconditions_met condition inside is_printable
                                     if (
@@ -5795,6 +5829,51 @@ class Twitch(object):
                                 f"campaign {campaign_id} final inventory drop claimed; "
                                 "waiting for inventory completion confirmation"
                             )
+
+    def __claim_completed_drop_promptly(self, drop, campaign):
+        # A drop that just reached 100% needs no more watch time, but waiting
+        # for the next sync cycle (up to 30 minutes) delays the claim and keeps
+        # the campaign in the "watchable" limbo. Claim in the background,
+        # debounced so repeated progress saves cannot spam the claim pass.
+        if drop.minutes_required <= 0 or drop.drop_instance_id is None:
+            return
+        now = time.monotonic()
+        with self.prompt_claim_lock:
+            last = self.prompt_claim_last.get(drop.drop_instance_id)
+            if last is not None and (now - last) < PROMPT_CLAIM_DEBOUNCE_SECONDS:
+                return
+            self.prompt_claim_last[drop.drop_instance_id] = now
+            self.prompt_claim_last = {
+                instance_id: stamp
+                for instance_id, stamp in self.prompt_claim_last.items()
+                if (now - stamp) < PROMPT_CLAIM_DEBOUNCE_SECONDS
+            }
+        Thread(
+            target=self.__run_prompt_claim,
+            args=(drop, campaign),
+            name=f"prompt-claim-{campaign.id}",
+            daemon=True,
+        ).start()
+
+    def __run_prompt_claim(self, drop, campaign):
+        if not self.prompt_claim_pass_lock.acquire(blocking=False):
+            logger.info(
+                "Prompt claim skipped; an inventory claim pass is already running"
+            )
+            return
+        try:
+            logger.info(
+                f"Drop '{drop.name}' of campaign '{campaign.name}' reached 100%; "
+                "claiming inventory drops promptly"
+            )
+            self.claim_all_drops_from_inventory()
+        except Exception:
+            logger.error(
+                "Prompt claim after drop capture failed; the sync cycle will retry",
+                exc_info=True,
+            )
+        finally:
+            self.prompt_claim_pass_lock.release()
 
     def sync_campaigns(self, streamers, chunk_size=3):
         campaigns_update = 0

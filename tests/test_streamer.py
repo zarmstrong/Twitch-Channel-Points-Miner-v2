@@ -1,10 +1,31 @@
-from types import SimpleNamespace
-
 import pytest
 
 from TwitchChannelPointsMiner.classes.Chat import ChatPresence
 from TwitchChannelPointsMiner.classes.entities.Bet import BetSettings, DelayMode
+from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer, StreamerSettings
+
+
+def campaign_data():
+    return {
+        "id": "campaign-1",
+        "game": {"displayName": "Example Game"},
+        "name": "Example Campaign",
+        "status": "ACTIVE",
+        "allow": {"channels": []},
+        "startAt": "2020-01-01T00:00:00Z",
+        "endAt": "2099-01-01T00:00:00Z",
+        "timeBasedDrops": [
+            {
+                "id": "drop-1",
+                "name": "Reward",
+                "benefitEdges": [{"benefit": {"name": "Badge"}}],
+                "requiredMinutesWatched": 10,
+                "startAt": "2020-01-01T00:00:00Z",
+                "endAt": "2099-01-01T00:00:00Z",
+            }
+        ],
+    }
 
 
 def streamer_settings(**overrides):
@@ -113,9 +134,21 @@ def test_drops_condition_requires_online_stream_with_unclaimed_drops():
     streamer = Streamer("channel", settings=streamer_settings())
     streamer.is_online = True
     streamer.stream.campaigns_ids = ["campaign-1"]
-    streamer.stream.campaigns = [SimpleNamespace(drops=["drop-1"])]
+    campaign = Campaign(campaign_data())
+    streamer.stream.campaigns = [campaign]
 
     assert streamer.drops_condition() is True
 
-    streamer.stream.campaigns[0].drops = []
+    campaign.drops = []
+    assert streamer.drops_condition() is False
+
+
+def test_drops_condition_is_false_when_all_drops_are_captured_but_unclaimed():
+    streamer = Streamer("channel", settings=streamer_settings())
+    streamer.is_online = True
+    streamer.stream.campaigns_ids = ["campaign-1"]
+    campaign = Campaign(campaign_data())
+    campaign.drops[0].current_minutes_watched = 10
+    streamer.stream.campaigns = [campaign]
+
     assert streamer.drops_condition() is False

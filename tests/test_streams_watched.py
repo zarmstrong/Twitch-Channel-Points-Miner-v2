@@ -153,12 +153,13 @@ def _run_one_watch_iteration(
     now=None,
     twitch_out=None,
     post_side_effects=None,
+    completed_drop_campaigns=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
     twitch.analytics_mutex = Lock()
     twitch.user_agent = "test-agent"
-    twitch.completed_drop_campaigns = set()
+    twitch.completed_drop_campaigns = set(completed_drop_campaigns or [])
     twitch.category_campaign_eligibility = {
         (
             twitch._Twitch__slugify(streamer.stream.game_name()),
@@ -170,8 +171,8 @@ def _run_one_watch_iteration(
     twitch.category_campaign_deadlines = category_campaign_deadlines or {}
     twitch.last_category_drop_selection = None
     twitch.last_wildcard_category_drop_selection = None
-    twitch.twitchdrops_app_campaigns = {}
     twitch.last_drop_pick_streamer = last_drop_pick_streamer
+    twitch.twitchdrops_app_campaigns = {}
     twitch.drop_inventory_progress = drop_inventory_progress or {}
     twitch.drop_inventory_progress_updated_at = (
         now if drop_inventory_progress and now is not None else 0
@@ -220,8 +221,8 @@ def _run_one_watch_iteration(
         streams_watched=streams_watched,
         source_priority=source_priority,
         drop_progress_stall_minutes=drop_progress_stall_minutes,
-    )
         drop_pick_stickiness_minutes=drop_pick_stickiness_minutes,
+    )
     return posted
 
 
@@ -724,6 +725,50 @@ def test_minute_watcher_ignores_stale_campaigns_after_category_completion(
     assert posted == ["https://spade.test/next-streamer"]
 
 
+def test_minute_watcher_stops_fully_captured_unclaimed_category_stream(monkeypatch):
+    # A campaign whose drops are all at 100% watch time but not yet claimed
+    # needs no more watching; completion must be inferred from progress alone.
+    captured_streamer = _watch_streamer(
+        "captured-category", from_category=True, drops_eligible=True
+    )
+    captured_streamer.stream.campaigns_ids = ["campaign-1"]
+    captured_streamer.settings.claim_drops = True
+    inventory_campaign = {
+        "id": "campaign-1",
+        "name": "Captured Campaign",
+        "game": {"displayName": "captured-category"},
+        "timeBasedDrops": [
+            {
+                "id": "drop-1",
+                "name": "Reward",
+                "requiredMinutesWatched": 30,
+                "startAt": "2020-01-01T00:00:00Z",
+                "endAt": "2099-01-01T00:00:00Z",
+                "self": {
+                    "hasPreconditionsMet": True,
+                    "currentMinutesWatched": 30,
+                    "dropInstanceID": "instance-1",
+                    "isClaimed": False,
+                },
+            }
+        ],
+    }
+    seed_twitch = Twitch.__new__(Twitch)
+    completed = seed_twitch._Twitch__completed_campaign_ids_from_inventory(
+        {"dropCampaignsInProgress": [inventory_campaign]}
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [captured_streamer, _watch_streamer("next-streamer")],
+        streams_watched=1,
+        completed_drop_campaigns=completed,
+    )
+
+    assert completed == {"campaign-1"}
+    assert posted == ["https://spade.test/next-streamer"]
+
+
 def test_minute_watcher_backfills_slot_after_extra_category_stream(monkeypatch):
     posted = _run_one_watch_iteration(
         monkeypatch,
@@ -843,6 +888,8 @@ def test_follower_source_can_be_prioritized_over_explicit_streamers(monkeypatch)
     )
 
     assert posted == ["https://spade.test/followed"]
+
+
 def test_watched_streamer_log_includes_selection_reason(monkeypatch):
     messages = []
     twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
@@ -884,8 +931,6 @@ def test_source_priority_appends_omitted_sources():
         StreamerSource.CATEGORIES,
         StreamerSource.WILDCARD_CATEGORIES,
     ]
-
-
 
 
 def test_source_priority_default_order_sorts_wildcard_last():
@@ -1365,6 +1410,44 @@ def test_drop_pick_stickiness_hold_logs_stickiness_reason(monkeypatch):
         "info",
         lambda message, **kwargs: messages.append(message),
     )
+
+    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
+    current.stream.game_name = lambda: "Current Game"
+    sooner = _watch_streamer("sooner-pick", from_category=True, drops_eligible=True)
+    sooner.stream.game_name = lambda: "Sooner Game"
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [sooner, current],
+        streams_watched=1,
+        category_campaign_deadlines={
+            "current-game": datetime(2099, 1, 2),
+            "sooner-game": datetime(2099, 1, 1, 23, 50),
+        },
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+    )
+
+    selection = [
+        message
+        for message in messages
+        if "Selected" in message and "for drops" in message
+    ]
+    assert len(selection) == 1
+    assert "current-pick" in selection[0]
+    assert "held by stickiness" in selection[0]
+    assert "sooner-pick" in selection[0]
+    assert "soonest-expiring of" not in selection[0]
+
+
+def test_category_drop_pick_logs_selection_reason_only_on_change(monkeypatch):
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
     monkeypatch.setattr(
         Twitch,
         "_Twitch__chuncked_sleep",
@@ -1419,44 +1502,6 @@ def test_drop_pick_stickiness_hold_logs_stickiness_reason(monkeypatch):
 def test_category_drop_pick_log_distinguishes_no_slot_from_no_eligible(monkeypatch):
     messages = []
     twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
-    monkeypatch.setattr(
-        twitch_module.logger,
-        "info",
-        lambda message, **kwargs: messages.append(message),
-    )
-
-
-    selection = [
-        message
-        for message in messages
-        if "Selected" in message and "for drops" in message
-    ]
-    assert len(selection) == 1
-    assert "current-pick" in selection[0]
-    assert "held by stickiness" in selection[0]
-    assert "sooner-pick" in selection[0]
-    assert "soonest-expiring of" not in selection[0]
-
-
-def test_category_drop_pick_logs_selection_reason_only_on_change(monkeypatch):
-    messages = []
-    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
-    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
-    current.stream.game_name = lambda: "Current Game"
-    sooner = _watch_streamer("sooner-pick", from_category=True, drops_eligible=True)
-    sooner.stream.game_name = lambda: "Sooner Game"
-
-    _run_one_watch_iteration(
-        monkeypatch,
-        [sooner, current],
-        streams_watched=1,
-        category_campaign_deadlines={
-            "current-game": datetime(2099, 1, 2),
-            "sooner-game": datetime(2099, 1, 1, 23, 50),
-        },
-        drop_pick_stickiness_minutes=15,
-        last_drop_pick_streamer="current-pick",
-    )
     monkeypatch.setattr(
         twitch_module.logger,
         "info",
