@@ -138,10 +138,18 @@ begin
   // Powers the desktop shell's embedded Dashboard tab. Without this, a
   // config.py created by the installer (rather than the exe's own first-run
   // template copy) would start with analytics disabled and nothing for the
-  // Dashboard tab to show. Mirrors ensure_windows_analytics_defaults() in
-  // windows_launcher.py, which does the same thing for a ZIP install's
-  // first launch.
-  if Pos('''enable_analytics'': False,', ConfigText) > 0 then
+  // Dashboard tab to show. This is a Pascal port of
+  // ensure_windows_analytics_defaults() in windows_launcher.py, which does
+  // the same thing for a ZIP install's first launch - keep the two in sync.
+  //
+  // AfterInstall only runs when this [Files] entry actually copied the
+  // template (Inno Setup skips it when config.py already exists, thanks to
+  // onlyifdoesntexist), so ConfigText here should always be the untouched
+  // template. Both markers are still checked explicitly anyway, matching
+  // config_editor.py's "never overwrite an existing configuration"
+  // invariant rather than relying solely on that flag's behavior.
+  if (Pos('''enable_analytics'': False,', ConfigText) > 0) and
+     (Pos('ANALYTICS_CONFIG = None', ConfigText) > 0) then
   begin
     StringChangeEx(ConfigText, '''enable_analytics'': False,',
       '''enable_analytics'': True,', True);

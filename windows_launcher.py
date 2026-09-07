@@ -2,6 +2,7 @@
 
 """Windows executable entry point for Twitch Channel Points Miner."""
 
+import ctypes  # cross-platform stdlib module; only .windll is Windows-only (guarded below)
 import os
 import secrets
 import shutil
@@ -13,10 +14,46 @@ import webbrowser
 from collections import deque
 from pathlib import Path
 
-from TwitchChannelPointsMiner.runner import main as runner_main
+
+class _NullStream:
+    """Absorbs writes harmlessly.
+
+    A --windowed PyInstaller build starts with sys.stdout/sys.stderr set to
+    None (no OS console attached) until something replaces them. Without
+    this, the first print() or log call anywhere in this process - including
+    ones triggered merely by importing TwitchChannelPointsMiner below, before
+    main() ever runs - would crash with an AttributeError on a None stream.
+    main() replaces this with the real Console-tab capture almost
+    immediately; anything written before then is lost, not shown in the
+    Console tab, but the process no longer crashes over it.
+    """
+
+    def write(self, _text):
+        pass
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+
+if sys.stdout is None:
+    sys.stdout = _NullStream()
+if sys.stderr is None:
+    sys.stderr = _NullStream()
+
+
+from TwitchChannelPointsMiner.runner import main as runner_main  # noqa: E402
 
 DEFAULT_ANALYTICS_PORT = 5000
 _ANALYTICS_DISABLED_MARKER = "'enable_analytics': False,"
+# ensure_windows_analytics_defaults() below only ever touches a config still
+# at these exact bundled-template defaults. windows_installer.iss's
+# CustomizeStarterConfig has an equivalent check (search it for this
+# function's name) for the installer's own pre-created config.py - keep the
+# two in sync if either changes.
+_ANALYTICS_CONFIG_UNSET_MARKER = "ANALYTICS_CONFIG = None"
 
 
 def application_directory():
@@ -62,18 +99,45 @@ def pause_for_first_run():
         pass
 
 
+def _show_fatal_error_message(text):
+    """Best-effort native fallback for when nothing else can reach the user.
+
+    A --windowed build has no console, and if the desktop shell itself never
+    opened, there is no window either - a native message box is the only
+    remaining way to avoid failing completely silently.
+    """
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.user32.MessageBoxW(
+            0, text, "Twitch Channel Points Miner - Error", 0x10  # MB_ICONERROR
+        )
+    except Exception:
+        pass
+
+
 def ensure_windows_analytics_defaults(config_path):
     """First-run only: turn on the embedded dashboard with a generated password.
 
     The bundled template ships with analytics disabled, so a brand-new user
-    would otherwise have nothing for the shell's Dashboard tab to show. Only
-    ever called once, immediately after `prepare_config` writes a fresh
-    config from the template - an existing config is never touched. Returns
-    the generated password, or None if the template's shape has changed and
-    the marker this looks for is no longer present.
+    would otherwise have nothing for the shell's Dashboard tab to show.
+    Intended to only ever run once, immediately after `prepare_config` writes
+    a fresh config from the template - but also independently checks the
+    file's actual content (not just trusting the caller's `created` gate) so
+    it can never overwrite a configuration someone has already touched,
+    matching config_editor.py's "never overwrite an existing configuration"
+    invariant. Returns the generated password, or None if either marker this
+    looks for is missing - either because the template's shape changed, or
+    because enable_analytics/ANALYTICS_CONFIG have already been customized.
+
+    windows_installer.iss's CustomizeStarterConfig procedure is a Pascal
+    port of this same logic for the installer's own pre-created config.py;
+    keep the two in sync.
     """
     source = config_path.read_text(encoding="utf-8")
     if _ANALYTICS_DISABLED_MARKER not in source:
+        return None
+    if _ANALYTICS_CONFIG_UNSET_MARKER not in source:
         return None
 
     password = secrets.token_urlsafe(18)
@@ -190,10 +254,13 @@ class _TeeStream:
 def install_console_capture(buffer):
     """Mirror stdout/stderr into `buffer` for the shell's Console tab.
 
-    Installed before anything else so it captures startup prints, the
-    logging module's console handler (configured later, once the miner
+    Installed as early as possible in main() so it captures startup prints,
+    the logging module's console handler (configured later, once the miner
     thread reaches Settings.logger setup), and any traceback a windowed
-    build (no OS console) would otherwise lose entirely.
+    build (no OS console) would otherwise lose entirely. Whatever is
+    currently installed - a real stream, or the module-level _NullStream
+    fallback above - becomes this tee's underlying stream, so nothing
+    printed before this call is duplicated once it runs.
     """
     sys.stdout = _TeeStream(buffer, sys.stdout)
     sys.stderr = _TeeStream(buffer, sys.stderr)
@@ -235,7 +302,33 @@ class WindowApi:
             webbrowser.open(self._dashboard_info["url"])
 
 
-def launch_shell(dashboard_info, console_buffer, initial_tab):
+def _make_close_confirmation_handler(window, miner_thread):
+    """Build a `window.events.closing` handler that blocks the close unless
+    the user confirms, whenever the miner is still running.
+
+    Before this shell existed, stopping the miner required an explicit
+    Ctrl+C; a bare click on the window's close button must not silently end
+    an unattended, hours-long mining session. Returning False from a
+    pywebview `closing` handler cancels the close.
+    """
+
+    def on_closing():
+        if not miner_thread.is_alive():
+            return True
+        try:
+            return window.create_confirmation_dialog(
+                "Stop mining?",
+                "Closing this window will stop mining. Are you sure?",
+            )
+        except Exception:
+            # If the dialog itself can't be shown, err on the side of NOT
+            # silently stopping an unattended miner.
+            return False
+
+    return on_closing
+
+
+def launch_shell(dashboard_info, console_buffer, initial_tab, miner_thread):
     """Open the two-tab desktop shell (Dashboard + Console).
 
     Imports pywebview lazily so this module stays importable - and
@@ -248,7 +341,7 @@ def launch_shell(dashboard_info, console_buffer, initial_tab):
     shell_html = bundled_file(os.path.join("assets", "windows_shell.html")).read_text(
         encoding="utf-8"
     )
-    webview.create_window(
+    window = webview.create_window(
         "Twitch Channel Points Miner",
         html=shell_html,
         js_api=api,
@@ -256,6 +349,7 @@ def launch_shell(dashboard_info, console_buffer, initial_tab):
         height=800,
         min_size=(800, 600),
     )
+    window.events.closing += _make_close_confirmation_handler(window, miner_thread)
     webview.start()
 
 
@@ -313,14 +407,16 @@ def main():
     initial_tab = "config" if is_first_shell_launch else None
 
     try:
-        launch_shell(dashboard_info, console_buffer, initial_tab)
+        launch_shell(dashboard_info, console_buffer, initial_tab, miner_thread)
     except Exception as error:
         # Covers a missing pywebview install, no WebView2 runtime, or any
         # other GUI backend failure - none of which should crash the miner.
-        print(
+        message = (
             f"Could not open the desktop window ({error}); "
             "falling back to your default browser."
         )
+        print(message)
+        _show_fatal_error_message(message)
         if dashboard_info:
             webbrowser.open(dashboard_info["url"])
         pause_for_first_run()
@@ -336,5 +432,24 @@ def main():
     return 0
 
 
+def run():
+    """Entry point wrapper: on a genuinely uncaught failure, show a native
+    message box before re-raising.
+
+    A --windowed build has no console to print a traceback to, so without
+    this an unexpected crash here would fail completely silently - no
+    window, no console, no error, nothing.
+    """
+    try:
+        return main()
+    except Exception as error:
+        _show_fatal_error_message(
+            "Twitch Channel Points Miner failed to start:\n\n"
+            f"{error}\n\n"
+            "Check the logs folder beside the executable for details."
+        )
+        raise
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run())

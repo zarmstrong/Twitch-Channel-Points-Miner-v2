@@ -2,6 +2,7 @@ import builtins
 import os
 import socket
 import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -97,7 +98,7 @@ def test_main_starts_miner_thread_and_launches_shell_when_interactive(
     monkeypatch.setattr(
         windows_launcher,
         "launch_shell",
-        lambda dashboard_info, console_buffer, initial_tab: shell_calls.append(
+        lambda dashboard_info, console_buffer, initial_tab, miner_thread: shell_calls.append(
             (dashboard_info, initial_tab)
         ),
     )
@@ -140,7 +141,7 @@ def test_main_enables_analytics_and_opens_config_tab_on_first_run(tmp_path, monk
     monkeypatch.setattr(
         windows_launcher,
         "launch_shell",
-        lambda dashboard_info, console_buffer, initial_tab: shell_calls.append(
+        lambda dashboard_info, console_buffer, initial_tab, miner_thread: shell_calls.append(
             (dashboard_info, initial_tab)
         ),
     )
@@ -186,7 +187,7 @@ def test_main_opens_config_tab_for_preexisting_installer_created_config(
     monkeypatch.setattr(
         windows_launcher,
         "launch_shell",
-        lambda dashboard_info, console_buffer, initial_tab: shell_calls.append(
+        lambda dashboard_info, console_buffer, initial_tab, miner_thread: shell_calls.append(
             initial_tab
         ),
     )
@@ -199,6 +200,57 @@ def test_main_opens_config_tab_for_preexisting_installer_created_config(
     shell_calls.clear()
     assert windows_launcher.main() == 0
     assert shell_calls == [None]
+
+
+def test_main_leaves_existing_config_untouched_on_upgrade_launch(tmp_path, monkeypatch):
+    # Simulates upgrading an existing pre-shell install: config.py already
+    # exists (so `created` is False) with analytics explicitly disabled, and
+    # no onboarding marker exists yet either. BUILD.md documents that an
+    # existing configuration is never overwritten; this must hold here too.
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config_path = config_dir / "config.py"
+    # CONFIG_VERSION matches the current schema so the unrelated schema
+    # migrator (which legitimately rewrites genuinely old configs, and would
+    # otherwise make this assertion about a *different* mechanism) is a
+    # verified no-op here - isolating the one thing under test: the
+    # analytics-defaults bootstrap.
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    original = (
+        f"CONFIG_VERSION = {CONFIG_VERSION}\n"
+        "MINER_CONFIG = {\n"
+        "    'username': 'someone',\n"
+        "    'enable_analytics': False,\n"
+        "}\n"
+        "STREAMERS = []\n"
+        "MINE_CONFIG = {}\n"
+        "ANALYTICS_CONFIG = None\n"
+    )
+    config_path.write_text(original, encoding="utf-8")
+    assert not (config_dir / ".desktop_shell_onboarded").is_file()
+
+    shell_calls = []
+    monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(windows_launcher, "runner_main", lambda argv: 0)
+    monkeypatch.setattr(
+        windows_launcher,
+        "launch_shell",
+        lambda dashboard_info, console_buffer, initial_tab, miner_thread: shell_calls.append(
+            (dashboard_info, initial_tab)
+        ),
+    )
+    monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
+
+    assert windows_launcher.main() == 0
+
+    assert config_path.read_text(encoding="utf-8") == original
+    # Analytics stayed off (nothing for the Dashboard tab to show), but this
+    # machine has never been through the shell before, so onboarding still
+    # offers the Config tab once.
+    assert shell_calls == [(None, "config")]
 
 
 def test_main_falls_back_to_browser_when_shell_launch_fails(tmp_path, monkeypatch):
@@ -279,6 +331,26 @@ def test_ensure_windows_analytics_defaults_enables_dashboard(tmp_path):
 def test_ensure_windows_analytics_defaults_leaves_unrecognized_template_alone(tmp_path):
     config_path = tmp_path / "config.py"
     original = "MINER_CONFIG = {'enable_analytics': True}\n"
+    config_path.write_text(original, encoding="utf-8")
+
+    result = windows_launcher.ensure_windows_analytics_defaults(config_path)
+
+    assert result is None
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_ensure_windows_analytics_defaults_ignores_customized_analytics_config(tmp_path):
+    # Defense in depth: even called directly - bypassing main()'s `created`
+    # gate and windows_installer.iss's AfterInstall/onlyifdoesntexist gate -
+    # this must never touch a config where ANALYTICS_CONFIG has already been
+    # customized, even though enable_analytics is still False verbatim.
+    config_path = tmp_path / "config.py"
+    original = (
+        "MINER_CONFIG = {\n"
+        "    'enable_analytics': False,\n"
+        "}\n"
+        "ANALYTICS_CONFIG = {'host': '0.0.0.0', 'port': 9000, 'password': 'mypassword'}\n"
+    )
     config_path.write_text(original, encoding="utf-8")
 
     result = windows_launcher.ensure_windows_analytics_defaults(config_path)
@@ -502,4 +574,184 @@ def test_launch_shell_surfaces_missing_pywebview(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
     with pytest.raises(ModuleNotFoundError):
-        windows_launcher.launch_shell(None, windows_launcher.ConsoleBuffer(), None)
+        windows_launcher.launch_shell(
+            None, windows_launcher.ConsoleBuffer(), None, threading.Thread()
+        )
+
+
+class _FakeMinerThread:
+    def __init__(self, alive):
+        self._alive = alive
+
+    def is_alive(self):
+        return self._alive
+
+
+def test_close_confirmation_allows_close_when_miner_thread_finished():
+    class FakeWindow:
+        def create_confirmation_dialog(self, title, message):
+            raise AssertionError("dialog should not be shown when miner isn't running")
+
+    handler = windows_launcher._make_close_confirmation_handler(
+        FakeWindow(), _FakeMinerThread(alive=False)
+    )
+
+    assert handler() is True
+
+
+def test_close_confirmation_blocks_close_by_default_while_mining():
+    class FakeWindow:
+        def __init__(self):
+            self.calls = []
+
+        def create_confirmation_dialog(self, title, message):
+            self.calls.append((title, message))
+            return False  # simulates the user clicking Cancel
+
+    window = FakeWindow()
+    handler = windows_launcher._make_close_confirmation_handler(
+        window, _FakeMinerThread(alive=True)
+    )
+
+    assert handler() is False
+    assert window.calls == [
+        ("Stop mining?", "Closing this window will stop mining. Are you sure?")
+    ]
+
+
+def test_close_confirmation_proceeds_when_user_confirms():
+    class FakeWindow:
+        def create_confirmation_dialog(self, title, message):
+            return True  # simulates the user clicking OK
+
+    handler = windows_launcher._make_close_confirmation_handler(
+        FakeWindow(), _FakeMinerThread(alive=True)
+    )
+
+    assert handler() is True
+
+
+def test_close_confirmation_blocks_close_if_dialog_itself_fails():
+    class FakeWindow:
+        def create_confirmation_dialog(self, title, message):
+            raise RuntimeError("no GUI backend available")
+
+    handler = windows_launcher._make_close_confirmation_handler(
+        FakeWindow(), _FakeMinerThread(alive=True)
+    )
+
+    assert handler() is False
+
+
+def test_launch_shell_wires_close_confirmation_handler(monkeypatch):
+    # Mimics pywebview's `window.events.closing += handler` protocol: `+=`
+    # calls __iadd__ and reassigns its *return value* back onto
+    # `window.events.closing`, so the handler itself is captured into a
+    # side channel here rather than relied on via that reassignment.
+    captured = {}
+
+    class FakeEventSlot:
+        def __iadd__(self, handler):
+            captured["closing"] = handler
+            return self
+
+    class FakeEvents:
+        def __init__(self):
+            self.closing = FakeEventSlot()
+
+    class FakeWindow:
+        def __init__(self):
+            self.events = FakeEvents()
+
+    class FakeWebview:
+        def create_window(self, *args, **kwargs):
+            return FakeWindow()
+
+        def start(self):
+            pass
+
+    fake_webview = FakeWebview()
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "webview":
+            return fake_webview
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    windows_launcher.launch_shell(
+        None, windows_launcher.ConsoleBuffer(), None, _FakeMinerThread(alive=True)
+    )
+
+    assert callable(captured.get("closing"))
+
+
+def test_show_fatal_error_message_uses_native_message_box_on_windows(monkeypatch):
+    calls = []
+
+    class FakeUser32:
+        def MessageBoxW(self, hwnd, text, caption, flags):
+            calls.append((hwnd, text, caption, flags))
+
+    class FakeWindll:
+        user32 = FakeUser32()
+
+    monkeypatch.setattr(windows_launcher.os, "name", "nt")
+    monkeypatch.setattr(windows_launcher.ctypes, "windll", FakeWindll(), raising=False)
+
+    windows_launcher._show_fatal_error_message("boom")
+
+    assert calls == [(0, "boom", "Twitch Channel Points Miner - Error", 0x10)]
+
+
+def test_show_fatal_error_message_noop_on_other_platforms(monkeypatch):
+    monkeypatch.setattr(windows_launcher.os, "name", "posix")
+    # Accessing .windll at all (even just to fail) would be a bug on
+    # non-Windows; deleting the attribute makes any such access raise
+    # immediately instead of silently succeeding because ctypes.windll
+    # happens to still exist from a previous test's monkeypatch.
+    monkeypatch.delattr(windows_launcher.ctypes, "windll", raising=False)
+
+    windows_launcher._show_fatal_error_message("boom")  # must not raise
+
+
+def test_show_fatal_error_message_swallows_dialog_failures(monkeypatch):
+    class ExplodingWindll:
+        @property
+        def user32(self):
+            raise RuntimeError("no such API")
+
+    monkeypatch.setattr(windows_launcher.os, "name", "nt")
+    monkeypatch.setattr(windows_launcher.ctypes, "windll", ExplodingWindll(), raising=False)
+
+    windows_launcher._show_fatal_error_message("boom")  # must not raise
+
+
+def test_run_shows_native_error_and_reraises_on_uncaught_failure(monkeypatch):
+    shown = []
+    monkeypatch.setattr(
+        windows_launcher,
+        "main",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(
+        windows_launcher, "_show_fatal_error_message", lambda text: shown.append(text)
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        windows_launcher.run()
+
+    assert len(shown) == 1
+    assert "boom" in shown[0]
+
+
+def test_run_returns_main_result_without_showing_error_on_success(monkeypatch):
+    monkeypatch.setattr(windows_launcher, "main", lambda: 0)
+    monkeypatch.setattr(
+        windows_launcher,
+        "_show_fatal_error_message",
+        lambda _text: (_ for _ in ()).throw(AssertionError("should not show on success")),
+    )
+
+    assert windows_launcher.run() == 0
