@@ -721,7 +721,7 @@ def enable_analytics_dashboard(
     config_path,
     password,
     host="127.0.0.1",
-    port=5000,
+    port=54455,
     refresh=5,
     days_ago=7,
     log_poll_interval=5,

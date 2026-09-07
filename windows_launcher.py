@@ -53,7 +53,14 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (  # noqa: E402
 from TwitchChannelPointsMiner.config_editor import _assignment, _dict_item, _simple_value
 from TwitchChannelPointsMiner.runner import main as runner_main  # noqa: E402
 
-DEFAULT_ANALYTICS_PORT = 5000
+DEFAULT_ANALYTICS_PORT = 54455
+# Deliberately not 5000: that port is commonly already taken (Hyper-V's
+# reserved dynamic port ranges on Windows, other dev tools, or a leftover
+# copy of this app itself), which surfaces as a confusing bind failure or,
+# worse, the shell silently talking to whatever else is already there. This
+# high, uncommon port is only the default for a *newly created* config -
+# users can still change it in ANALYTICS_CONFIG at any time, and an existing
+# config that already has a 'port' value keeps it untouched.
 # Used only for the literal text edit in ensure_windows_analytics_defaults()
 # below, never as a safety gate - see that function's docstring for why.
 _ANALYTICS_DISABLED_MARKER = "'enable_analytics': False,"

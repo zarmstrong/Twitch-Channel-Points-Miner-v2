@@ -25,7 +25,7 @@ services:
       - ./logs:/usr/src/app/logs
       - ./config:/usr/src/app/config
     ports:
-      - "5000:5000"
+      - "54455:54455"
 ```
 
 On first authentication, run the container interactively so you can complete

@@ -175,7 +175,7 @@ services:
       - ./logs:/usr/src/app/logs
       - ./config:/usr/src/app/config
     ports:
-      - "5000:5000"
+      - "54455:54455"
 ```
 
 Run `docker compose up`. On the first run, the container creates
@@ -198,7 +198,7 @@ docker run --rm -it \
     -v "$(pwd)/cookies:/usr/src/app/cookies" \
     -v "$(pwd)/logs:/usr/src/app/logs" \
     -v "$(pwd)/config:/usr/src/app/config" \
-    -p 5000:5000 \
+    -p 54455:54455 \
     zacharmstrong/twitch-channel-points-miner:latest
 ```
 
@@ -217,7 +217,7 @@ docker run --name twitch-miner -it \
     -v "$(pwd)/cookies:/usr/src/app/cookies" \
     -v "$(pwd)/logs:/usr/src/app/logs" \
     -v "$(pwd)/config:/usr/src/app/config" \
-    -p 5000:5000 \
+    -p 54455:54455 \
     zacharmstrong/twitch-channel-points-miner:latest
 ```
 
@@ -834,7 +834,7 @@ services:
       - ./logs:/usr/src/app/logs
       - ./config:/usr/src/app/config
     ports:
-      - "5000:5000"
+      - "54455:54455"
 ```
 
 **Example with docker run:**
@@ -847,7 +847,7 @@ docker run \
     -v $(pwd)/cookies:/usr/src/app/cookies \
     -v $(pwd)/logs:/usr/src/app/logs \
     -v $(pwd)/config:/usr/src/app/config \
-    -p 5000:5000 \
+    -p 54455:54455 \
     zacharmstrong/twitch-channel-points-miner
 ```
 
@@ -907,7 +907,7 @@ docker run --name user1 -it \
     -v $(pwd)/user1/cookies:/usr/src/app/cookies \
     -v $(pwd)/user1/logs:/usr/src/app/logs \
     -v $(pwd)/user1/analytics:/usr/src/app/analytics \
-    -p 5001:5000 \
+    -p 54456:54455 \
     zacharmstrong/twitch-channel-points-miner
 ```
 
@@ -917,7 +917,7 @@ docker run --name user2 -it \
     -v $(pwd)/user2/cookies:/usr/src/app/cookies \
     -v $(pwd)/user2/logs:/usr/src/app/logs \
     -v $(pwd)/user2/analytics:/usr/src/app/analytics \
-    -p 5002:5000 \
+    -p 54457:54455 \
     zacharmstrong/twitch-channel-points-miner
 ```
 
@@ -1437,6 +1437,9 @@ and HTTPS guidance described below.
 
 Enable storage with `MINER_CONFIG["enable_analytics"] = True` and configure the
 server through `ANALYTICS_CONFIG`. The chart refreshes every `refresh` minutes.
+`port` defaults to `54455` for a newly created `ANALYTICS_CONFIG` (chosen to
+avoid the common conflicts on port `5000`); an existing configuration that
+already sets `port` keeps that value untouched.
 The log viewer polls every `log_poll_interval` seconds (default `5`; accepted
 range `1` to `180`), and `days_ago` controls the chart's initial time range.
 
@@ -1453,7 +1456,7 @@ MINER_CONFIG = {
 
 ANALYTICS_CONFIG = {
     "host": "127.0.0.1",
-    "port": 5000,
+    "port": 54455,
     "refresh": 5,
     "days_ago": 7,
     "log_poll_interval": 5,
@@ -1462,7 +1465,7 @@ ANALYTICS_CONFIG = {
 
 ### Analytics security and HTTPS reverse proxy
 
-The analytics server contains account activity and miner logs. Its built-in authentication uses HTTP Basic authentication, which does not encrypt credentials or response data. Binding it to `0.0.0.0` exposes it to every reachable network interface; use a strong, unique analytics password and do not expose port 5000 directly to the internet.
+The analytics server contains account activity and miner logs. Its built-in authentication uses HTTP Basic authentication, which does not encrypt credentials or response data. Binding it to `0.0.0.0` exposes it to every reachable network interface; use a strong, unique analytics password and do not expose the analytics port (`54455` by default) directly to the internet.
 
 For remote access, keep the miner bound to loopback and terminate HTTPS in a reverse proxy. A minimal nginx location looks like this:
 
@@ -1475,7 +1478,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/analytics.example.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:5000;
+        proxy_pass http://127.0.0.1:54455;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;

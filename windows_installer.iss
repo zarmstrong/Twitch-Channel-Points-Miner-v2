@@ -171,7 +171,7 @@ begin
       '# Change these values (or set enable_analytics back to False) any time.' + #13#10 +
       'ANALYTICS_CONFIG = {' + #13#10 +
       '    ''host'': ''127.0.0.1'',' + #13#10 +
-      '    ''port'': 5000,' + #13#10 +
+      '    ''port'': 54455,' + #13#10 +
       '    ''refresh'': 5,' + #13#10 +
       '    ''days_ago'': 7,' + #13#10 +
       '    ''password'': ''' + GeneratePassword(24) + ''',' + #13#10 +
