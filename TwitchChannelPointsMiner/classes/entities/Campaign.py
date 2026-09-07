@@ -60,6 +60,14 @@ class Campaign(object):
             filter(lambda x: x.dt_match is True and x.is_claimed is False, self.drops)
         )
 
+    def has_watchable_drops(self):
+        return any(
+            drop.dt_match is True
+            and drop.is_claimed is False
+            and drop.current_minutes_watched < drop.minutes_required
+            for drop in self.drops
+        )
+
     def __eq__(self, other):
         if isinstance(other, self.__class__):
             return self.id == other.id
