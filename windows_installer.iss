@@ -47,6 +47,12 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; WorkingDi
 Filename: "https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3#configuration-file"; Description: "Open the configuration guide"; Flags: shellexec postinstall skipifsilent unchecked
 
 [Code]
+const
+  // Pascal Script doesn't support local const declarations inside a
+  // function (it fails to compile with "'BEGIN' expected"), so this has
+  // to live at script level even though only GeneratePassword uses it.
+  PasswordChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+
 var
   ConfigurePage: TInputQueryWizardPage;
 
@@ -58,14 +64,12 @@ begin
 end;
 
 function GeneratePassword(PasswordLength: Integer): String;
-const
-  Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 var
   i: Integer;
 begin
   Result := '';
   for i := 1 to PasswordLength do
-    Result := Result + Chars[Random(Length(Chars)) + 1];
+    Result := Result + PasswordChars[Random(Length(PasswordChars)) + 1];
 end;
 
 function PythonStreamerList(Value: String): String;
