@@ -121,12 +121,20 @@ var autoUpdateLog = true;
 // Variable to keep track of the last received log index
 var lastReceivedLogIndex = 0;
 var initialLogTailBytes = 128 * 1024;
+// The markup's initial #log-content text is only a placeholder shown before
+// the first real response arrives - cleared on that first response instead
+// of staying glued above the real tail forever.
+var logPlaceholderCleared = false;
 
 // Load a recent tail first, then request only entries appended after it.
 // Lazily started the first time the Logs tab is opened, then keeps polling
 // in the background (like the Drops/Now Watching refreshes) until paused.
 function getLog() {
     $.get(`/log?lastIndex=${lastReceivedLogIndex}&tailBytes=${initialLogTailBytes}`).done(function (data, _status, xhr) {
+        if (!logPlaceholderCleared) {
+            $("#log-content").empty();
+            logPlaceholderCleared = true;
+        }
         // Process and display the new log entries received
         // Logs contain Twitch-controlled text (for example prediction
         // titles), so never interpret them as HTML.
