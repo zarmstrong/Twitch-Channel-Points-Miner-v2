@@ -54,6 +54,23 @@
         if (safeStorage.getItem('dark-mode') === 'false') {
             document.getElementById('dark-theme').disabled = true;
         }
+
+        // The shell bypass cookie set after the first request doesn't
+        // reliably survive for later same-origin requests made from inside
+        // the Windows desktop shell's embedded iframe (the same class of
+        // third-party-context restriction as safeStorage above), so every
+        // request 401s once the cookie is relied upon alone. Instead, reuse
+        // the shell_token the parent shell already put on this frame's own
+        // URL and re-attach it to every AJAX call this page makes - a real
+        // browser tab has no such token in its URL, so this is a no-op there
+        // and cookie-based Basic Auth keeps working as before.
+        var shellBypassToken = new URLSearchParams(window.location.search).get('shell_token');
+        if (shellBypassToken) {
+            $.ajaxPrefilter(function (options) {
+                options.url += (options.url.indexOf('?') === -1 ? '?' : '&') +
+                    'shell_token=' + encodeURIComponent(shellBypassToken);
+            });
+        }
     </script>
     <link href="{{url_for('static', filename='style.css', v=assetVersion)}}" rel="stylesheet" />
 
