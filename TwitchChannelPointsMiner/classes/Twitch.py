@@ -14,10 +14,10 @@ import string
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from secrets import choice, token_hex
-from threading import BoundedSemaphore, Event, Lock
+from threading import BoundedSemaphore, Event, Lock, Thread
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -2282,10 +2282,23 @@ class Twitch(object):
                 if game_slug not in twitch_evaluated_category_slugs
             }
         )
-        # Cache the per-category deadlines so send_minute_watched_events can
-        # arbitrate between simultaneously-live category streams by whichever
-        # campaign is closest to expiring, instead of by discovery order.
-        self.category_campaign_deadlines = dict(active_category_deadlines)
+        # Merge, don't replace: the wildcard pass owns the full-catalog
+        # deadline dict and is skipped whenever this preferred pass finds a
+        # live channel, so replacing here would wipe every wildcard deadline
+        # and the drop pick would flip between real deadlines and "no known
+        # deadline" as the passes alternate. Preserve wildcard entries this
+        # evaluation didn't cover, prune expired ones, and let the fresh
+        # evaluation win for games it did cover.
+        now = datetime.utcnow()
+        preserved_deadlines = {
+            game_slug: deadline
+            for game_slug, deadline in (
+                getattr(self, "category_campaign_deadlines", None) or {}
+            ).items()
+            if deadline > now and game_slug not in active_category_deadlines
+        }
+        preserved_deadlines.update(active_category_deadlines)
+        self.category_campaign_deadlines = preserved_deadlines
         if active_category_deadlines == {}:
             for requested_slug in requested_category_slugs:
                 self.__replace_category_campaign_eligibility(requested_slug, {})
@@ -2375,6 +2388,10 @@ class Twitch(object):
             twitch_category_slugs,
         ) = self.__active_drop_category_slugs_from_campaigns(inventory, None)
         twitch_candidate_count = len(active_category_deadlines)
+        # The fallback mutates known_category_slugs (every gist-indexed game
+        # gets added), so snapshot the Twitch-observed slugs first: filtering
+        # external additions against the mutated set would always be empty.
+        twitch_evaluated_category_slugs = twitch_category_slugs.copy()
         if refresh_external_catalog or not getattr(
             self, "twitchdrops_app_catalog_complete", False
         ):
@@ -2386,7 +2403,7 @@ class Twitch(object):
         external_additions = {
             game_slug: deadline
             for game_slug, deadline in fallback_deadlines.items()
-            if game_slug not in twitch_category_slugs
+            if game_slug not in twitch_evaluated_category_slugs
         }
         active_category_deadlines.update(external_additions)
         # Replace, not merge: this call always evaluates every open campaign
