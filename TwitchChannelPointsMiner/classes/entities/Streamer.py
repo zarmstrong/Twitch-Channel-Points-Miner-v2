@@ -243,15 +243,15 @@ class Streamer(object):
         return self.stream_up == 0 or ((time.time() - self.stream_up) > 120)
 
     def drops_condition(self):
-        has_unclaimed_campaign_drops = any(
-            campaign.drops != [] for campaign in self.stream.campaigns
+        has_watchable_campaign_drops = any(
+            campaign.has_watchable_drops() for campaign in self.stream.campaigns
         )
         return (
             self.settings.claim_drops is True
             and self.is_online is True
             # and self.stream.drops_tags is True
             and self.stream.campaigns_ids != []
-            and has_unclaimed_campaign_drops is True
+            and has_watchable_campaign_drops is True
         )
 
     def viewer_has_points_multiplier(self):

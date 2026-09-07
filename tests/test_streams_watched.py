@@ -2,7 +2,7 @@ import importlib
 import inspect
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Lock
 from types import SimpleNamespace
 
@@ -19,7 +19,11 @@ from TwitchChannelPointsMiner.TwitchChannelPointsMiner import (
 from TwitchChannelPointsMiner.classes.Twitch import Twitch
 from TwitchChannelPointsMiner.classes.Settings import Priority, Settings, StreamerSource
 from TwitchChannelPointsMiner.classes.entities.Raid import Raid
-from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
+from TwitchChannelPointsMiner.classes.entities.Streamer import (
+    Streamer,
+    StreamerSettings,
+)
+from TwitchChannelPointsMiner.utils.Utils import set_default_settings
 
 
 def test_streams_watched_defaults_to_two():
@@ -54,9 +58,9 @@ def test_drop_progress_stall_defaults_to_ten_minutes():
     mine_parameter = inspect.signature(TwitchChannelPointsMiner.mine).parameters[
         "drop_progress_stall_minutes"
     ]
-    watcher_parameter = inspect.signature(
-        Twitch.send_minute_watched_events
-    ).parameters["drop_progress_stall_minutes"]
+    watcher_parameter = inspect.signature(Twitch.send_minute_watched_events).parameters[
+        "drop_progress_stall_minutes"
+    ]
 
     assert mine_parameter.default == 10
     assert watcher_parameter.default == 10
@@ -143,16 +147,19 @@ def _run_one_watch_iteration(
     drop_inventory_progress=None,
     drop_watch_health=None,
     drop_progress_stall_minutes=10,
+    drop_pick_stickiness_minutes=0,
+    last_drop_pick_streamer=None,
     category_campaign_deadlines=None,
     now=None,
     twitch_out=None,
     post_side_effects=None,
+    completed_drop_campaigns=None,
 ):
     twitch = Twitch.__new__(Twitch)
     twitch.running = True
     twitch.analytics_mutex = Lock()
     twitch.user_agent = "test-agent"
-    twitch.completed_drop_campaigns = set()
+    twitch.completed_drop_campaigns = set(completed_drop_campaigns or [])
     twitch.category_campaign_eligibility = {
         (
             twitch._Twitch__slugify(streamer.stream.game_name()),
@@ -164,6 +171,7 @@ def _run_one_watch_iteration(
     twitch.category_campaign_deadlines = category_campaign_deadlines or {}
     twitch.last_category_drop_selection = None
     twitch.last_wildcard_category_drop_selection = None
+    twitch.last_drop_pick_streamer = last_drop_pick_streamer
     twitch.twitchdrops_app_campaigns = {}
     twitch.drop_inventory_progress = drop_inventory_progress or {}
     twitch.drop_inventory_progress_updated_at = (
@@ -213,6 +221,7 @@ def _run_one_watch_iteration(
         streams_watched=streams_watched,
         source_priority=source_priority,
         drop_progress_stall_minutes=drop_progress_stall_minutes,
+        drop_pick_stickiness_minutes=drop_pick_stickiness_minutes,
     )
     return posted
 
@@ -581,12 +590,8 @@ def test_minute_watcher_rotates_stalled_drop_streamer(monkeypatch, caplog):
     assert "rotating to another eligible Game channel (replacement)" in caplog.text
 
 
-def test_minute_watcher_keeps_stalled_streamer_without_alternative(
-    monkeypatch, caplog
-):
-    only_streamer = _watch_streamer(
-        "only", from_category=True, drops_eligible=True
-    )
+def test_minute_watcher_keeps_stalled_streamer_without_alternative(monkeypatch, caplog):
+    only_streamer = _watch_streamer("only", from_category=True, drops_eligible=True)
     only_streamer.stream.game_name = lambda: "Game"
     only_streamer.is_watching = True
 
@@ -627,7 +632,10 @@ def test_drop_progress_advancement_resets_stall_timer(monkeypatch, caplog):
     assert posted == ["https://spade.test/replacement"]
     assert health["game"]["last_progress_at"] == 600
     assert health["game"]["rotation_from"] is None
-    assert "Drop progress resumed on replacement after rotating from stalled" in caplog.text
+    assert (
+        "Drop progress resumed on replacement after rotating from stalled"
+        in caplog.text
+    )
 
 
 def test_stale_inventory_does_not_rotate_drop_streamer(monkeypatch, caplog):
@@ -676,9 +684,7 @@ def test_minute_watcher_uses_second_slot_for_explicit_stream(monkeypatch):
     posted = _run_one_watch_iteration(
         monkeypatch,
         [
-            _watch_streamer(
-                "category", from_category=True, drops_eligible=True
-            ),
+            _watch_streamer("category", from_category=True, drops_eligible=True),
             _watch_streamer("explicit"),
         ],
         streams_watched=2,
@@ -716,6 +722,50 @@ def test_minute_watcher_ignores_stale_campaigns_after_category_completion(
         streams_watched=1,
     )
 
+    assert posted == ["https://spade.test/next-streamer"]
+
+
+def test_minute_watcher_stops_fully_captured_unclaimed_category_stream(monkeypatch):
+    # A campaign whose drops are all at 100% watch time but not yet claimed
+    # needs no more watching; completion must be inferred from progress alone.
+    captured_streamer = _watch_streamer(
+        "captured-category", from_category=True, drops_eligible=True
+    )
+    captured_streamer.stream.campaigns_ids = ["campaign-1"]
+    captured_streamer.settings.claim_drops = True
+    inventory_campaign = {
+        "id": "campaign-1",
+        "name": "Captured Campaign",
+        "game": {"displayName": "captured-category"},
+        "timeBasedDrops": [
+            {
+                "id": "drop-1",
+                "name": "Reward",
+                "requiredMinutesWatched": 30,
+                "startAt": "2020-01-01T00:00:00Z",
+                "endAt": "2099-01-01T00:00:00Z",
+                "self": {
+                    "hasPreconditionsMet": True,
+                    "currentMinutesWatched": 30,
+                    "dropInstanceID": "instance-1",
+                    "isClaimed": False,
+                },
+            }
+        ],
+    }
+    seed_twitch = Twitch.__new__(Twitch)
+    completed = seed_twitch._Twitch__completed_campaign_ids_from_inventory(
+        {"dropCampaignsInProgress": [inventory_campaign]}
+    )
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [captured_streamer, _watch_streamer("next-streamer")],
+        streams_watched=1,
+        completed_drop_campaigns=completed,
+    )
+
+    assert completed == {"campaign-1"}
     assert posted == ["https://spade.test/next-streamer"]
 
 
@@ -791,12 +841,16 @@ def test_freed_wildcard_slot_backfills_with_explicit_streamer(monkeypatch):
 
 def test_wildcard_category_one_per_cycle_prefers_soonest_expiring(monkeypatch):
     slow_game = _watch_streamer(
-        "later-deadline", from_category=True, drops_eligible=True,
+        "later-deadline",
+        from_category=True,
+        drops_eligible=True,
         from_wildcard_category=True,
     )
     slow_game.stream.game_name = lambda: "Slow Game"
     urgent_game = _watch_streamer(
-        "sooner-deadline", from_category=True, drops_eligible=True,
+        "sooner-deadline",
+        from_category=True,
+        drops_eligible=True,
         from_wildcard_category=True,
     )
     urgent_game.stream.game_name = lambda: "Urgent Game"
@@ -834,11 +888,11 @@ def test_follower_source_can_be_prioritized_over_explicit_streamers(monkeypatch)
     )
 
     assert posted == ["https://spade.test/followed"]
+
+
 def test_watched_streamer_log_includes_selection_reason(monkeypatch):
     messages = []
-    twitch_module = importlib.import_module(
-        "TwitchChannelPointsMiner.classes.Twitch"
-    )
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
     monkeypatch.setattr(
         twitch_module.logger,
         "info",
@@ -890,9 +944,7 @@ def test_source_priority_default_order_sorts_wildcard_last():
 
 
 @pytest.mark.parametrize("value", [0, 3, True, "1", None])
-def test_badge_drop_streamer_limit_rejects_values_other_than_one_or_two(
-    caplog, value
-):
+def test_badge_drop_streamer_limit_rejects_values_other_than_one_or_two(caplog, value):
     assert _normalize_badge_drop_streamer_limit(value) == 1
     assert "badge_drop_streamer_limit must be either 1 or 2" in caplog.text
 
@@ -928,11 +980,469 @@ def test_category_drop_pick_prefers_soonest_expiring_campaign(monkeypatch):
     assert posted == ["https://spade.test/sooner-deadline"]
 
 
+def test_drop_pick_stickiness_keeps_current_within_margin(monkeypatch):
+    # The previously picked streamer's campaign expires 10 minutes later than
+    # the best alternative - inside the stickiness margin, so no churn.
+    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
+    current.stream.game_name = lambda: "Current Game"
+    sooner = _watch_streamer("sooner-pick", from_category=True, drops_eligible=True)
+    sooner.stream.game_name = lambda: "Sooner Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [sooner, current],
+        streams_watched=1,
+        category_campaign_deadlines={
+            "current-game": datetime(2099, 1, 2),
+            "sooner-game": datetime(2099, 1, 1, 23, 50),
+        },
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+    )
+
+    assert posted == ["https://spade.test/current-pick"]
+
+
+def test_drop_pick_stickiness_switches_when_alternative_beats_margin(monkeypatch):
+    # The alternative's campaign expires 5 hours sooner - well beyond the
+    # stickiness margin, so the pick must switch despite stickiness.
+    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
+    current.stream.game_name = lambda: "Current Game"
+    sooner = _watch_streamer("sooner-pick", from_category=True, drops_eligible=True)
+    sooner.stream.game_name = lambda: "Sooner Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [current, sooner],
+        streams_watched=1,
+        category_campaign_deadlines={
+            "current-game": datetime(2099, 1, 2),
+            "sooner-game": datetime(2099, 1, 1, 19, 0),
+        },
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+    )
+
+    assert posted == ["https://spade.test/sooner-pick"]
+
+
+def test_drop_pick_stickiness_disabled_always_picks_soonest(monkeypatch):
+    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
+    current.stream.game_name = lambda: "Current Game"
+    sooner = _watch_streamer("sooner-pick", from_category=True, drops_eligible=True)
+    sooner.stream.game_name = lambda: "Sooner Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [sooner, current],
+        streams_watched=1,
+        category_campaign_deadlines={
+            "current-game": datetime(2099, 1, 2),
+            "sooner-game": datetime(2099, 1, 1, 23, 50),
+        },
+        drop_pick_stickiness_minutes=0,
+        last_drop_pick_streamer="current-pick",
+    )
+
+    assert posted == ["https://spade.test/sooner-pick"]
+
+
+def test_drop_pick_stickiness_updates_tracked_pick(monkeypatch):
+    # The tracked pick must follow the actually watched streamer so the next
+    # cycle's stickiness compares against the right campaign.
+    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
+    current.stream.game_name = lambda: "Current Game"
+    twitch_out = []
+    _run_one_watch_iteration(
+        monkeypatch,
+        [current],
+        streams_watched=1,
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="someone-else",
+        twitch_out=twitch_out,
+    )
+
+    assert twitch_out[0].last_drop_pick_streamer == "current-pick"
+
+
+def test_drop_pick_hold_keeps_current_while_drop_can_finish(monkeypatch):
+    # A challenger whose campaign expires well beyond the stickiness margin
+    # must still lose to the current pick while the current pick's game has an
+    # in-progress drop that can finish before its campaign deadline.
+    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
+    current.stream.game_name = lambda: "Current Game"
+    sooner = _watch_streamer("sooner-pick", from_category=True, drops_eligible=True)
+    sooner.stream.game_name = lambda: "Sooner Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [current, sooner],
+        streams_watched=2,
+        category_campaign_deadlines={
+            "current-game": datetime(2099, 1, 2),
+            "sooner-game": datetime(2099, 1, 1, 19, 0),
+        },
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+        drop_inventory_progress={"current-game": _drop_progress(current=10)},
+        now=1_700_000_000,
+    )
+
+    assert posted == ["https://spade.test/current-pick"]
+
+
+def test_drop_pick_hold_releases_when_drop_cannot_finish(monkeypatch):
+    # When the in-progress drop needs more minutes than the campaign has left,
+    # holding is pointless - the more urgent campaign must win the slot.
+    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
+    current.stream.game_name = lambda: "Current Game"
+    sooner = _watch_streamer("sooner-pick", from_category=True, drops_eligible=True)
+    sooner.stream.game_name = lambda: "Sooner Game"
+
+    deadline_in_minutes = 120
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [current, sooner],
+        streams_watched=2,
+        category_campaign_deadlines={
+            "current-game": datetime.utcnow() + timedelta(minutes=deadline_in_minutes),
+            "sooner-game": datetime.utcnow()
+            + timedelta(minutes=deadline_in_minutes // 2),
+        },
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+        drop_inventory_progress={
+            "current-game": (
+                ("campaign-1", "Example campaign", "drop-1", "Example drop", 0, 220),
+            ),
+        },
+        now=1_700_000_000,
+    )
+
+    assert posted == ["https://spade.test/sooner-pick"]
+
+
+def test_drop_pick_survives_transient_eligibility_failure(monkeypatch):
+    # A category refresh can leave the previously picked streamer with stale,
+    # empty per-channel campaign state for a cycle. While its game still has
+    # an in-progress drop in the inventory, the pick must not rotate to
+    # another campaign. The failure is transient state, not a disabled
+    # claim_drops setting - the hold requires claims to stay enabled.
+    current = _watch_streamer(
+        "current-pick", from_wildcard_category=True, drops_eligible=True
+    )
+    current.drops_condition = lambda: False
+    current.stream.game_name = lambda: "Current Game"
+    challenger = _watch_streamer(
+        "challenger", from_wildcard_category=True, drops_eligible=True
+    )
+    challenger.stream.game_name = lambda: "Challenger Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [current, challenger],
+        streams_watched=1,
+        priority=[Priority.DROPS],
+        category_campaign_deadlines={"current-game": datetime(2099, 1, 2)},
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+        drop_inventory_progress={"current-game": _drop_progress(current=10)},
+        now=1_700_000_000,
+    )
+
+    assert posted == ["https://spade.test/current-pick"]
+
+
+def test_drop_pick_not_held_when_campaign_left_inventory(monkeypatch):
+    # With no in-progress drop for its game, the transient hold must not keep
+    # an otherwise ineligible streamer in the watch rotation.
+    current = _watch_streamer(
+        "current-pick", from_wildcard_category=True, drops_eligible=True
+    )
+    current.drops_condition = lambda: False
+    current.stream.game_name = lambda: "Current Game"
+    challenger = _watch_streamer(
+        "challenger", from_wildcard_category=True, drops_eligible=True
+    )
+    challenger.stream.game_name = lambda: "Challenger Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [current, challenger],
+        streams_watched=1,
+        priority=[Priority.DROPS],
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+        drop_inventory_progress={},
+        now=1_700_000_000,
+    )
+
+    assert posted == ["https://spade.test/challenger"]
+
+
+def test_drop_pick_not_held_when_channel_offline(monkeypatch):
+    current = _watch_streamer(
+        "current-pick", from_wildcard_category=True, drops_eligible=True
+    )
+    current.stream.game_name = lambda: "Current Game"
+    current.is_online = False
+    challenger = _watch_streamer(
+        "challenger", from_wildcard_category=True, drops_eligible=True
+    )
+    challenger.stream.game_name = lambda: "Challenger Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [current, challenger],
+        streams_watched=1,
+        priority=[Priority.DROPS],
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+        drop_inventory_progress={"current-game": _drop_progress(current=10)},
+        now=1_700_000_000,
+    )
+
+    assert posted == ["https://spade.test/challenger"]
+
+
+def test_drop_pick_hold_logs_reason(monkeypatch):
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+
+    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
+    current.stream.game_name = lambda: "Current Game"
+    sooner = _watch_streamer("sooner-pick", from_category=True, drops_eligible=True)
+    sooner.stream.game_name = lambda: "Sooner Game"
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [current, sooner],
+        streams_watched=2,
+        category_campaign_deadlines={
+            "current-game": datetime(2099, 1, 2),
+            "sooner-game": datetime(2099, 1, 1, 19, 0),
+        },
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+        drop_inventory_progress={"current-game": _drop_progress(current=10)},
+        now=1_700_000_000,
+    )
+
+    selection_messages = [
+        message
+        for message in messages
+        if "Selected" in message and "for drops" in message
+    ]
+    assert len(selection_messages) == 1
+    assert "current-pick" in selection_messages[0]
+    assert "holding in-progress drop 'Example drop'" in selection_messages[0]
+    assert "campaign deadline in" in selection_messages[0]
+
+
+def test_streak_priority_does_not_slot_discovered_streamers(monkeypatch):
+    # Discovered category/wildcard/badge streamers are created with
+    # watch_streak=False, so a freshly-online channel with a missing streak
+    # can no longer grab a watch slot at the STREAK level - only explicitly
+    # configured streamers (and enabled followed channels) do. The freed slot
+    # then goes to the soonest-expiring campaign at the DROPS level.
+    configured = _watch_streamer("configured-streak", watch_streak=True)
+    streaky_fresh = _watch_streamer(
+        "streaky-fresh", from_category=True, drops_eligible=True
+    )
+    streaky_fresh.settings.watch_streak = False
+    streaky_fresh.stream.watch_streak_missing = True
+    streaky_fresh.stream.game_name = lambda: "Later Game"
+    soonest = _watch_streamer("category-soon", from_category=True, drops_eligible=True)
+    soonest.stream.game_name = lambda: "Urgent Game"
+
+    posted = _run_one_watch_iteration(
+        monkeypatch,
+        [configured, streaky_fresh, soonest],
+        streams_watched=2,
+        priority=[Priority.STREAK, Priority.DROPS],
+        category_campaign_deadlines={
+            "later-game": datetime(2099, 1, 3),
+            "urgent-game": datetime(2099, 1, 1),
+        },
+    )
+
+    assert posted == [
+        "https://spade.test/configured-streak",
+        "https://spade.test/category-soon",
+    ]
+
+
+def test_discovered_streamer_watch_streak_false_survives_defaults():
+    # set_default_settings only fills None fields, so the watch_streak=False
+    # passed at the discovered-streamer creation sites must survive the merge
+    # with the user's global streamer settings (watch_streak=True here).
+    original = getattr(Settings, "streamer_settings", None)
+    Settings.streamer_settings = StreamerSettings(watch_streak=True)
+    try:
+        settings = set_default_settings(
+            StreamerSettings(claim_drops=True, watch_streak=False),
+            Settings.streamer_settings,
+        )
+    finally:
+        Settings.streamer_settings = original
+
+    assert settings.watch_streak is False
+
+
+def test_followers_source_enabled_detection():
+    miner = TwitchChannelPointsMiner.__new__(TwitchChannelPointsMiner)
+
+    miner.configured_source_priority = None
+    assert miner._followers_source_enabled() is True
+
+    miner.configured_source_priority = [
+        StreamerSource.STREAMERS,
+        StreamerSource.CATEGORIES,
+    ]
+    assert miner._followers_source_enabled() is False
+
+    miner.configured_source_priority = [StreamerSource.FOLLOWERS]
+    assert miner._followers_source_enabled() is True
+
+
+def test_drop_pick_logs_only_slotted_candidate_reason(monkeypatch):
+    # A higher-priority allocation (FAVORITE) took the only watch slot for a
+    # later-expiring category stream; the soonest-expiring eligible campaign
+    # never competed for a slot. The log must not claim "soonest-expiring".
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+
+    urgent = _watch_streamer("urgent-drop", from_category=True, drops_eligible=True)
+    urgent.stream.game_name = lambda: "Urgent Game"
+    fav_later = _watch_streamer(
+        "fav-later", from_category=True, drops_eligible=True, favorite=True
+    )
+    fav_later.stream.game_name = lambda: "Later Game"
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [fav_later, urgent],
+        streams_watched=1,
+        priority=[Priority.FAVORITE, Priority.DROPS],
+        category_campaign_deadlines={
+            "urgent-game": datetime(2099, 1, 1),
+            "later-game": datetime(2099, 1, 2),
+        },
+    )
+
+    selection = [
+        message
+        for message in messages
+        if "Selected" in message and "for drops" in message
+    ]
+    assert len(selection) == 1
+    assert "fav-later" in selection[0]
+    assert "only slotted category candidate" in selection[0]
+    assert "urgent-drop" in selection[0]
+    assert "got no watch slot this cycle" in selection[0]
+    assert "soonest-expiring of" not in selection[0]
+
+
+def test_drop_pick_logs_slotted_subset_reason(monkeypatch):
+    # Several slotted category streams plus an unslotted sooner-expiring one:
+    # the reason must scope the expiration claim to the slotted subset and
+    # name the unslotted campaign.
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+
+    urgent = _watch_streamer("urgent-drop", from_category=True, drops_eligible=True)
+    urgent.stream.game_name = lambda: "Urgent Game"
+    fav_a = _watch_streamer(
+        "fav-a", from_category=True, drops_eligible=True, favorite=True
+    )
+    fav_a.stream.game_name = lambda: "Fav A Game"
+    fav_b = _watch_streamer(
+        "fav-b", from_category=True, drops_eligible=True, favorite=True
+    )
+    fav_b.stream.game_name = lambda: "Fav B Game"
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [fav_b, fav_a, urgent],
+        streams_watched=2,
+        priority=[Priority.FAVORITE, Priority.DROPS],
+        category_campaign_deadlines={
+            "urgent-game": datetime(2099, 1, 1),
+            "fav-a-game": datetime(2099, 1, 2),
+            "fav-b-game": datetime(2099, 1, 3),
+        },
+    )
+
+    selection = [
+        message
+        for message in messages
+        if "Selected" in message and "for drops" in message
+    ]
+    assert len(selection) == 1
+    assert "fav-a" in selection[0]
+    assert "soonest-expiring of 2 slotted category campaigns" in selection[0]
+    assert "1 eligible campaigns not slotted this cycle" in selection[0]
+    assert "urgent-drop" in selection[0]
+
+
+def test_drop_pick_stickiness_hold_logs_stickiness_reason(monkeypatch):
+    # Within the stickiness margin the previous pick keeps its slot over the
+    # more urgent challenger - the log must attribute that to stickiness.
+    messages = []
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(
+        twitch_module.logger,
+        "info",
+        lambda message, **kwargs: messages.append(message),
+    )
+
+    current = _watch_streamer("current-pick", from_category=True, drops_eligible=True)
+    current.stream.game_name = lambda: "Current Game"
+    sooner = _watch_streamer("sooner-pick", from_category=True, drops_eligible=True)
+    sooner.stream.game_name = lambda: "Sooner Game"
+
+    _run_one_watch_iteration(
+        monkeypatch,
+        [sooner, current],
+        streams_watched=1,
+        category_campaign_deadlines={
+            "current-game": datetime(2099, 1, 2),
+            "sooner-game": datetime(2099, 1, 1, 23, 50),
+        },
+        drop_pick_stickiness_minutes=15,
+        last_drop_pick_streamer="current-pick",
+    )
+
+    selection = [
+        message
+        for message in messages
+        if "Selected" in message and "for drops" in message
+    ]
+    assert len(selection) == 1
+    assert "current-pick" in selection[0]
+    assert "held by stickiness" in selection[0]
+    assert "sooner-pick" in selection[0]
+    assert "soonest-expiring of" not in selection[0]
+
+
 def test_category_drop_pick_logs_selection_reason_only_on_change(monkeypatch):
     messages = []
-    twitch_module = importlib.import_module(
-        "TwitchChannelPointsMiner.classes.Twitch"
-    )
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
     monkeypatch.setattr(
         twitch_module.logger,
         "info",
@@ -991,9 +1501,7 @@ def test_category_drop_pick_logs_selection_reason_only_on_change(monkeypatch):
 
 def test_category_drop_pick_log_distinguishes_no_slot_from_no_eligible(monkeypatch):
     messages = []
-    twitch_module = importlib.import_module(
-        "TwitchChannelPointsMiner.classes.Twitch"
-    )
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
     monkeypatch.setattr(
         twitch_module.logger,
         "info",
@@ -1038,9 +1546,7 @@ def test_category_drop_pick_log_distinguishes_no_slot_from_no_eligible(monkeypat
         streams_watched=2,
     )
 
-    no_slot_messages = [
-        m for m in messages if "eligible but no watch slot free" in m
-    ]
+    no_slot_messages = [m for m in messages if "eligible but no watch slot free" in m]
     assert len(no_slot_messages) == 1
     assert "queued-category" in no_slot_messages[0]
     assert "Some Game" in no_slot_messages[0]
@@ -1055,9 +1561,7 @@ def test_category_drop_pick_logs_when_first_candidate_appears_with_no_slot(
     # free" leave chosen_username as None - the dedup key must still treat
     # that transition as a change worth logging.
     messages = []
-    twitch_module = importlib.import_module(
-        "TwitchChannelPointsMiner.classes.Twitch"
-    )
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
     monkeypatch.setattr(
         twitch_module.logger,
         "info",
@@ -1110,8 +1614,6 @@ def test_category_drop_pick_logs_when_first_candidate_appears_with_no_slot(
         streams_watched=2,
     )
 
-    no_slot_messages = [
-        m for m in messages if "eligible but no watch slot free" in m
-    ]
+    no_slot_messages = [m for m in messages if "eligible but no watch slot free" in m]
     assert len(no_slot_messages) == 1
     assert "late-arrival" in no_slot_messages[0]

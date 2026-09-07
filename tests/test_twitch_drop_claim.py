@@ -1,5 +1,6 @@
 import importlib
 import logging
+from threading import Lock
 from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.classes.entities.Campaign import Campaign
@@ -867,6 +868,88 @@ def test_all_claimed_inventory_drops_confirm_campaign_completion(monkeypatch):
     assert completed == {"campaign-1"}
 
 
+def test_all_captured_unclaimed_inventory_drops_confirm_campaign_completion(
+    monkeypatch,
+):
+    twitch = bare_twitch(monkeypatch)
+    data = campaign_data()
+    data["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 10,
+        "dropInstanceID": "instance-1",
+        "isClaimed": False,
+    }
+
+    completed = twitch._Twitch__completed_campaign_ids_from_inventory(
+        {"dropCampaignsInProgress": [data]}
+    )
+
+    assert completed == {"campaign-1"}
+
+
+def test_partially_captured_inventory_campaign_is_not_completed(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    data = campaign_data()
+    data["timeBasedDrops"].append(
+        {
+            "id": "drop-2",
+            "name": "Second Reward",
+            "benefitEdges": [{"benefit": {"name": "Badge"}}],
+            "requiredMinutesWatched": 10,
+            "startAt": "2020-01-01T00:00:00Z",
+            "endAt": "2099-01-01T00:00:00Z",
+        }
+    )
+    data["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 10,
+        "dropInstanceID": "instance-1",
+        "isClaimed": False,
+    }
+    data["timeBasedDrops"][1]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 4,
+        "dropInstanceID": None,
+        "isClaimed": False,
+    }
+
+    completed = twitch._Twitch__completed_campaign_ids_from_inventory(
+        {"dropCampaignsInProgress": [data]}
+    )
+
+    assert completed == set()
+
+
+def test_fully_captured_unclaimed_campaign_stops_category_watch(monkeypatch):
+    twitch = bare_twitch(monkeypatch)
+    data = campaign_data()
+    data["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 10,
+        "dropInstanceID": "instance-1",
+        "isClaimed": False,
+    }
+    twitch.completed_drop_campaigns.update(
+        twitch._Twitch__completed_campaign_ids_from_inventory(
+            {"dropCampaignsInProgress": [data]}
+        )
+    )
+    twitch.category_campaign_eligibility[("example-game", "channel")] = (1, 1)
+    stream = SimpleNamespace(
+        campaigns_ids=["campaign-1"],
+        game_name=lambda: "Example Game",
+    )
+    streamer = SimpleNamespace(
+        username="channel",
+        from_category=True,
+        settings=SimpleNamespace(claim_drops=True),
+        is_online=True,
+        stream=stream,
+    )
+
+    assert twitch._Twitch__category_drops_condition(streamer) is False
+
+
 def test_completed_campaign_keeps_game_authoritative_after_twitch_removes_it(
     monkeypatch,
 ):
@@ -1142,3 +1225,87 @@ def test_drop_report_snapshot_uses_analytics_mutex():
     assert twitch.analytics_mutex.entered == 1
     assert snapshot is not twitch.drop_report_state
     assert snapshot["drop"] is not twitch.drop_report_state["drop"]
+
+
+class _SyncThread:
+    def __init__(self, target, args=(), name=None, daemon=None):
+        self._target = target
+        self._args = args
+
+    def start(self):
+        self._target(*self._args)
+
+
+def prompt_claim_twitch(monkeypatch, claimed):
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(twitch_module, "Thread", _SyncThread)
+    monkeypatch.setattr(
+        Twitch,
+        "claim_all_drops_from_inventory",
+        lambda self: claimed.append("claim"),
+    )
+    twitch = object.__new__(Twitch)
+    twitch.prompt_claim_lock = Lock()
+    twitch.prompt_claim_pass_lock = Lock()
+    twitch.prompt_claim_last = {}
+    return twitch
+
+
+def test_prompt_claim_debounce_is_per_drop(monkeypatch):
+    claimed = []
+    twitch = prompt_claim_twitch(monkeypatch, claimed)
+    drop = SimpleNamespace(
+        name="Reward", minutes_required=10, drop_instance_id="instance-1"
+    )
+    other_drop = SimpleNamespace(
+        name="Second Reward", minutes_required=10, drop_instance_id="instance-2"
+    )
+    campaign = SimpleNamespace(id="campaign-1", name="Example campaign")
+
+    twitch._Twitch__claim_completed_drop_promptly(drop, campaign)
+    twitch._Twitch__claim_completed_drop_promptly(drop, campaign)
+    twitch._Twitch__claim_completed_drop_promptly(other_drop, campaign)
+
+    # Repeats for the same drop are debounced, but a second drop completing
+    # within the debounce window still gets its own prompt claim.
+    assert claimed == ["claim", "claim"]
+    assert set(twitch.prompt_claim_last) == {"instance-1", "instance-2"}
+
+
+def test_prompt_claim_never_debounces_a_first_claim_on_a_fresh_clock(monkeypatch):
+    # time.monotonic() is time since boot, so on a fresh machine it can be
+    # below the debounce window. A first claim must not be treated as a
+    # repeat of a "never claimed" default.
+    claimed = []
+    twitch = prompt_claim_twitch(monkeypatch, claimed)
+    twitch_module = importlib.import_module("TwitchChannelPointsMiner.classes.Twitch")
+    monkeypatch.setattr(twitch_module.time, "monotonic", lambda: 100.0)
+    drop = SimpleNamespace(
+        name="Reward", minutes_required=10, drop_instance_id="instance-1"
+    )
+    campaign = SimpleNamespace(id="campaign-1", name="Example campaign")
+
+    twitch._Twitch__claim_completed_drop_promptly(drop, campaign)
+
+    assert claimed == ["claim"]
+    assert set(twitch.prompt_claim_last) == {"instance-1"}
+
+
+def test_prompt_claim_skips_while_another_claim_pass_is_running(monkeypatch):
+    claimed = []
+    twitch = prompt_claim_twitch(monkeypatch, claimed)
+    drop = SimpleNamespace(
+        name="Reward", minutes_required=10, drop_instance_id="instance-1"
+    )
+    campaign = SimpleNamespace(id="campaign-1", name="Example campaign")
+
+    twitch.prompt_claim_pass_lock.acquire()
+    try:
+        twitch._Twitch__claim_completed_drop_promptly(drop, campaign)
+    finally:
+        twitch.prompt_claim_pass_lock.release()
+
+    # The debounce still records the drop, but the claim pass is skipped while
+    # another one is running (the sync cycle covers it).
+    assert claimed == []
+    assert set(twitch.prompt_claim_last) == {"instance-1"}

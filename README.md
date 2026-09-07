@@ -485,6 +485,7 @@ settings.
 | `category_log_level` | `logging.INFO` | Severity used for category discovery and refresh messages. |
 | `category_refresh_interval_hours` | `6` | Hours between campaign/channel refreshes. Positive values have a 30-minute minimum; `0` disables refresh. |
 | `drop_progress_stall_minutes` | `10` | Rotate to another eligible category channel when authenticated Drop progress remains unchanged for this many minutes. The minimum is `5`; `0` disables stall detection. |
+| `drop_pick_stickiness_minutes` | `15` | Keep watching the currently picked drop channel unless another eligible campaign's deadline is at least this many minutes closer, the channel goes offline, its campaign finishes/ends, or the in-progress drop can no longer complete before its campaign deadline. While the in-progress drop can still finish in time, the pick is held even past the margin. `0` disables stickiness (always switch to the soonest-expiring campaign). |
 | `drop_badge_catalog` | `True` | On startup, classify rewards from the shared Drops gist against the shared Twitch badge catalog and persist the result in the config directory. |
 | `drop_badge_refresh_interval_hours` | `1` | Hours between checks for new campaigns. Positive values have a one-hour minimum; `0` keeps the startup check but disables periodic checks. |
 | `auto_mine_badge_drops` | `False` | Automatically add live channels for active, unearned watch-time badge campaigns. |

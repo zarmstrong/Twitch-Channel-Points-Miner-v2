@@ -1328,6 +1328,45 @@ def test_category_filter_uses_fallback_for_game_twitch_did_not_expose(monkeypatc
     ]
 
 
+def test_category_filter_preserves_unconfigured_wildcard_deadlines(monkeypatch):
+    twitch = twitch_with_gql(SimpleNamespace())
+    twitch.category_campaign_eligibility = {}
+    twitch.category_campaign_deadlines = {
+        "predecessor": datetime(2099, 1, 1),
+        "expired-game": datetime(2000, 1, 1),
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_inventory",
+        lambda self: {"gameEventDrops": []},
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__active_drop_category_slugs_from_campaigns",
+        lambda self, inventory, requested: (
+            {"inventory-game": datetime(2099, 2, 1)},
+            {"inventory-game"},
+        ),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__twitchdrops_app_fallback",
+        lambda self, categories, known_slugs: {},
+    )
+
+    assert twitch.filter_categories_with_active_drops(["inventory-game"]) == [
+        "inventory-game"
+    ]
+
+    # Wildcard deadlines the configured evaluation didn't cover survive the
+    # preferred pass (so the drop pick keeps real deadlines between wildcard
+    # cycles), expired ones are pruned, and the fresh evaluation wins for the
+    # games it did evaluate.
+    assert twitch.category_campaign_deadlines["predecessor"] == datetime(2099, 1, 1)
+    assert twitch.category_campaign_deadlines["inventory-game"] == datetime(2099, 2, 1)
+    assert "expired-game" not in twitch.category_campaign_deadlines
+
+
 @pytest.mark.parametrize(
     ("order", "categories", "expected"),
     [
@@ -1370,6 +1409,37 @@ def test_category_filter_orders_campaigns_across_inventory_and_fallback(
     assert (
         twitch.filter_categories_with_active_drops(categories, order=order) == expected
     )
+
+
+def test_wildcard_catalog_keeps_external_gist_candidates_despite_slug_mutation(
+    monkeypatch,
+):
+    twitch = twitch_with_gql(SimpleNamespace())
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_inventory",
+        lambda self: {"gameEventDrops": []},
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__active_drop_category_slugs_from_campaigns",
+        lambda self, inventory, requested: (
+            {"inventory-game": datetime(2099, 2, 1)},
+            {"inventory-game"},
+        ),
+    )
+
+    def fallback(self, categories, known_slugs):
+        known_slugs.add("predecessor")
+        return {"predecessor": datetime(2099, 1, 1)}
+
+    monkeypatch.setattr(Twitch, "_Twitch__twitchdrops_app_fallback", fallback)
+    monkeypatch.setattr(Twitch, "_Twitch__log_category", lambda *args, **kwargs: None)
+
+    assert twitch.get_wildcard_categories_with_active_drops() == [
+        "predecessor",
+        "inventory-game",
+    ]
 
 
 def test_category_streamer_keeps_fallback_eligibility_when_twitch_omits_campaign():

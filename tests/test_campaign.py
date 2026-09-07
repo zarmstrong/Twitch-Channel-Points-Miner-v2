@@ -51,6 +51,27 @@ def test_clear_drops_removes_claimed_and_inactive_drops():
     assert campaign.drops == []
 
 
+def test_has_watchable_drops_reflects_progress_and_claim_state():
+    campaign = Campaign(campaign_data())
+
+    assert campaign.has_watchable_drops() is True
+
+    campaign.drops[0].current_minutes_watched = 10
+    campaign.drops[1].current_minutes_watched = 4
+    assert campaign.has_watchable_drops() is True
+
+    campaign.drops[1].current_minutes_watched = 10
+    assert campaign.has_watchable_drops() is False
+
+    campaign.drops[1].is_claimed = True
+    campaign.drops[1].current_minutes_watched = 0
+    assert campaign.has_watchable_drops() is False
+
+    campaign.drops[1].is_claimed = False
+    campaign.drops[1].dt_match = False
+    assert campaign.has_watchable_drops() is False
+
+
 def test_sync_drops_updates_matching_drop_and_invokes_claim_callback():
     campaign = Campaign(campaign_data())
     claimed = []
