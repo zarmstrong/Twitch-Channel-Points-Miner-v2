@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import Lock, Thread
 
-from flask import Flask, Response, cli, render_template, request
+from flask import Flask, Response, cli, g, render_template, request
 
 from TwitchChannelPointsMiner import __version__
 from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX, Settings
@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 MAX_LOG_TAIL_BYTES = 1024 * 1024
 UPDATE_DISMISSAL_COOKIE = "tcpm_update_dismissed_version"
 RESPONSE_CACHE_TTL_SECONDS = 10.0
+
+# Set by windows_launcher.py, which runs the AnalyticsServer thread inside
+# the same process as its own trusted desktop shell - never by Docker or a
+# plain source checkout. Lets the shell's own embedded dashboard skip the
+# Basic Auth prompt without weakening it for anyone else: a browser opened
+# by anything other than that same process's launcher never has this token.
+SHELL_BYPASS_TOKEN_ENV_VAR = "TCPM_SHELL_ANALYTICS_TOKEN"
+SHELL_BYPASS_COOKIE = "tcpm_shell_token"
 
 
 class TTLResponseCache:
@@ -624,6 +632,7 @@ class AnalyticsServer(Thread):
         self.days_ago = days_ago
         self.username = username
         self.password = password
+        self.shell_bypass_token = os.environ.get(SHELL_BYPASS_TOKEN_ENV_VAR)
 
         if host not in {"127.0.0.1", "localhost", "::1"} and not password:
             raise ValueError("Analytics exposed beyond localhost requires a password")
@@ -701,6 +710,22 @@ class AnalyticsServer(Thread):
                         mimetype="application/json",
                     )
                 return None
+            if self.shell_bypass_token:
+                cookie_token = request.cookies.get(SHELL_BYPASS_COOKIE)
+                if cookie_token and secrets.compare_digest(
+                    cookie_token, self.shell_bypass_token
+                ):
+                    return None
+                query_token = request.args.get("shell_token")
+                if query_token and secrets.compare_digest(
+                    query_token, self.shell_bypass_token
+                ):
+                    # The cookie above is what authenticates every later
+                    # same-origin request the dashboard's own JS makes (it
+                    # has no way to repeat this query param) - persisted via
+                    # the after_request hook below, once, right here.
+                    g.tcpm_set_shell_bypass_cookie = True
+                    return None
             authorization = request.authorization
             valid_username = authorization is not None and secrets.compare_digest(
                 authorization.username or "", self.username or ""
@@ -715,6 +740,17 @@ class AnalyticsServer(Thread):
                 status=401,
                 headers={"WWW-Authenticate": 'Basic realm="Twitch analytics"'},
             )
+
+        @self.app.after_request
+        def persist_shell_bypass_cookie(response):
+            if getattr(g, "tcpm_set_shell_bypass_cookie", False):
+                response.set_cookie(
+                    SHELL_BYPASS_COOKIE,
+                    self.shell_bypass_token,
+                    httponly=True,
+                    samesite="Lax",
+                )
+            return response
 
         self.app.add_url_rule(
             "/",

@@ -45,6 +45,10 @@ if sys.stderr is None:
     sys.stderr = _NullStream()
 
 
+from TwitchChannelPointsMiner import __version__  # noqa: E402
+from TwitchChannelPointsMiner.classes.AnalyticsServer import (  # noqa: E402
+    SHELL_BYPASS_TOKEN_ENV_VAR,
+)
 from TwitchChannelPointsMiner.config_editor import _assignment, _dict_item, _simple_value
 from TwitchChannelPointsMiner.runner import main as runner_main  # noqa: E402
 
@@ -433,6 +437,25 @@ def _maybe_prompt_to_enable_analytics(window, dashboard_info, config_path, promp
         pass
 
 
+def _dashboard_url_with_bypass(url):
+    """Append the per-launch shell auth-bypass token (see main()) to a
+    dashboard URL, if one was set, so the embedded iframe (or the "Open in
+    browser" button) never has to prompt for Basic Auth credentials the
+    user just generated for themselves and has no reason to type back in.
+
+    A plain iframe/browser navigation can't attach a custom header, so this
+    rides along as a query parameter instead; AnalyticsServer's
+    require_authentication() persists it into a cookie on first use so the
+    dashboard's own later same-origin fetch() calls keep authenticating
+    without needing to repeat it.
+    """
+    token = os.environ.get(SHELL_BYPASS_TOKEN_ENV_VAR)
+    if not token:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}shell_token={token}"
+
+
 class WindowApi:
     """Bridge exposed to the shell's JavaScript as `window.pywebview.api`."""
 
@@ -444,6 +467,7 @@ class WindowApi:
         config_path,
         needs_username,
         start_mining,
+        logs_dir,
     ):
         self._console_buffer = console_buffer
         self._dashboard_info = dashboard_info
@@ -451,6 +475,7 @@ class WindowApi:
         self._config_path = config_path
         self._needs_username = needs_username
         self._start_mining = start_mining
+        self._logs_dir = logs_dir
 
     def get_console_tail(self, since_seq=0):
         lines, next_seq = self._console_buffer.tail(int(since_seq or 0))
@@ -486,18 +511,39 @@ class WindowApi:
             return {"url": None, "enabled": False}
         _wait_until_reachable(self._dashboard_info["host"], self._dashboard_info["port"])
         return {
-            "url": self._dashboard_info["url"],
+            "url": _dashboard_url_with_bypass(self._dashboard_info["url"]),
             "initial_tab": self._initial_tab,
             "enabled": True,
         }
 
     def open_in_browser(self):
         if self._dashboard_info:
-            webbrowser.open(self._dashboard_info["url"])
+            webbrowser.open(_dashboard_url_with_bypass(self._dashboard_info["url"]))
 
     def enable_dashboard(self):
         success, message = _enable_dashboard_from_shell(self._config_path)
         return {"success": success, "message": message}
+
+    def open_config_folder(self):
+        _open_folder(self._config_path.parent)
+
+    def open_logs_folder(self):
+        _open_folder(self._logs_dir)
+
+
+def _open_folder(path):
+    """Best-effort: open `path` in the OS file manager, creating it first if
+    it doesn't exist yet (e.g. the logs folder before the miner has written
+    anything). Silently does nothing if that fails - not worth surfacing an
+    error dialog over.
+    """
+    try:
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            os.startfile(path)  # noqa: S606 - Windows-only, opens Explorer
+    except OSError:
+        pass
 
 
 class _MinerThreadHandle:
@@ -553,6 +599,7 @@ def launch_shell(
     prompt_marker,
     needs_username,
     start_mining,
+    logs_dir,
 ):
     """Open the two-tab desktop shell (Dashboard + Console) - or, on a first
     run with no configured Twitch username yet, a setup screen that
@@ -566,18 +613,29 @@ def launch_shell(
     import webview
 
     api = WindowApi(
-        console_buffer, dashboard_info, initial_tab, config_path, needs_username, start_mining
+        console_buffer,
+        dashboard_info,
+        initial_tab,
+        config_path,
+        needs_username,
+        start_mining,
+        logs_dir,
     )
     shell_html = bundled_file(os.path.join("assets", "windows_shell.html")).read_text(
         encoding="utf-8"
     )
     window = webview.create_window(
-        "Twitch Channel Points Miner",
+        f"Twitch Channel Points Miner - {__version__}",
         html=shell_html,
         js_api=api,
         width=1200,
         height=800,
         min_size=(800, 600),
+        # pywebview disables in-page text selection by default; the Console
+        # tab exists specifically so logs can be read (and copied) here
+        # instead of a separate window, so that default would defeat its
+        # purpose.
+        text_select=True,
     )
     window.events.closing += _make_close_confirmation_handler(window, miner_thread)
 
@@ -654,6 +712,14 @@ def main():
     if not interactive:
         return runner_main(argv)
 
+    # A fresh, process-only secret (never written to config.py or disk) so
+    # this run's own embedded dashboard can skip the Basic Auth prompt -
+    # see _dashboard_url_with_bypass() and AnalyticsServer's
+    # require_authentication(). Set before the miner thread starts (whenever
+    # that ends up being - see the username-setup deferral below) so it's
+    # already there by the time AnalyticsServer reads it.
+    os.environ[SHELL_BYPASS_TOKEN_ENV_VAR] = secrets.token_urlsafe(32)
+
     # Read before starting the miner thread below, which loads (and may
     # migrate/rewrite) the same file - avoids racing two concurrent writers
     # on a first run right after an upgrade.
@@ -697,6 +763,7 @@ def main():
             analytics_prompt_marker,
             needs_username,
             start_mining,
+            application_dir / "logs",
         )
     except Exception as error:
         # Covers a missing pywebview install, no WebView2 runtime, or any

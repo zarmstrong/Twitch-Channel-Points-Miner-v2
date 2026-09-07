@@ -11,13 +11,23 @@ import pytest
 import windows_launcher
 
 
+@pytest.fixture(autouse=True)
+def _isolate_shell_bypass_token_env(monkeypatch):
+    # main() sets this real env var directly (not via monkeypatch, since
+    # it must actually reach the AnalyticsServer thread it starts) so it
+    # survives past any one test's teardown; clearing it before every test
+    # here stops one test's main() call from leaking a token into another
+    # test's assertions about dashboard URLs.
+    monkeypatch.delenv(windows_launcher.SHELL_BYPASS_TOKEN_ENV_VAR, raising=False)
+
+
 def _fake_launch_shell_recording(calls, extract=lambda dashboard_info, initial_tab: (
     dashboard_info,
     initial_tab,
 )):
     """A `launch_shell` stand-in accepting its full current signature, so
     call-site tests don't need to know about args (config_path, prompt_marker,
-    needs_username, start_mining) they aren't exercising."""
+    needs_username, start_mining, logs_dir) they aren't exercising."""
 
     def fake(
         dashboard_info,
@@ -28,6 +38,7 @@ def _fake_launch_shell_recording(calls, extract=lambda dashboard_info, initial_t
         prompt_marker,
         needs_username,
         start_mining,
+        logs_dir,
     ):
         calls.append(extract(dashboard_info, initial_tab))
 
@@ -95,6 +106,40 @@ def test_main_forwards_command_line_arguments(tmp_path, monkeypatch):
             "--convert-only",
         ]
     ]
+    # A scripted/automation run never starts a desktop shell or its
+    # dashboard, so it has no reason to generate an unused bypass secret.
+    assert windows_launcher.SHELL_BYPASS_TOKEN_ENV_VAR not in os.environ
+
+
+def test_main_sets_a_fresh_shell_bypass_token_before_launching_the_shell(
+    tmp_path, monkeypatch
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.py").write_text(
+        f"MINER_CONFIG = {{'username': {_REAL_USERNAME!r}}}\n"
+        "STREAMERS = []\n"
+        "MINE_CONFIG = {}\n"
+        "ANALYTICS_CONFIG = None\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".desktop_shell_onboarded").touch()
+    tokens_seen = []
+    monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(windows_launcher, "runner_main", lambda argv: 0)
+
+    def fake_launch_shell(*args, **kwargs):
+        tokens_seen.append(os.environ.get(windows_launcher.SHELL_BYPASS_TOKEN_ENV_VAR))
+
+    monkeypatch.setattr(windows_launcher, "launch_shell", fake_launch_shell)
+    monkeypatch.setattr(windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe"])
+
+    assert windows_launcher.main() == 0
+
+    assert len(tokens_seen) == 1
+    assert tokens_seen[0]  # non-empty: a real per-launch secret was set
 
 
 def test_main_starts_miner_thread_and_launches_shell_when_interactive(
@@ -174,6 +219,7 @@ def test_main_defers_mining_until_username_is_submitted(tmp_path, monkeypatch):
         prompt_marker,
         needs_username,
         start_mining,
+        logs_dir,
     ):
         shell_calls.append(needs_username)
         # Mining must not have started before the (simulated) setup panel
@@ -736,11 +782,39 @@ def test_window_api_get_console_tail_delegates_to_buffer():
         config_path=None,
         needs_username=False,
         start_mining=lambda: None,
+        logs_dir=None,
     )
 
     result = api.get_console_tail(0)
 
     assert result == {"lines": ["hello\n"], "next_seq": 1}
+
+
+def test_dashboard_url_with_bypass_appends_token_when_set(monkeypatch):
+    monkeypatch.setenv(windows_launcher.SHELL_BYPASS_TOKEN_ENV_VAR, "shell-secret")
+
+    assert (
+        windows_launcher._dashboard_url_with_bypass("http://127.0.0.1:5000/")
+        == "http://127.0.0.1:5000/?shell_token=shell-secret"
+    )
+
+
+def test_dashboard_url_with_bypass_appends_to_existing_query_string(monkeypatch):
+    monkeypatch.setenv(windows_launcher.SHELL_BYPASS_TOKEN_ENV_VAR, "shell-secret")
+
+    assert (
+        windows_launcher._dashboard_url_with_bypass("http://127.0.0.1:5000/?foo=bar")
+        == "http://127.0.0.1:5000/?foo=bar&shell_token=shell-secret"
+    )
+
+
+def test_dashboard_url_with_bypass_unchanged_when_no_token_set():
+    # The autouse fixture above already clears this env var, matching
+    # Docker/a plain source checkout, which never set it in the first place.
+    assert (
+        windows_launcher._dashboard_url_with_bypass("http://127.0.0.1:5000/")
+        == "http://127.0.0.1:5000/"
+    )
 
 
 def test_window_api_get_dashboard_info_returns_disabled_state():
@@ -751,6 +825,7 @@ def test_window_api_get_dashboard_info_returns_disabled_state():
         config_path=None,
         needs_username=False,
         start_mining=lambda: None,
+        logs_dir=None,
     )
 
     assert api.get_dashboard_info() == {"url": None, "enabled": False}
@@ -771,6 +846,7 @@ def test_window_api_get_dashboard_info_waits_for_port_then_returns_url(monkeypat
         config_path=None,
         needs_username=False,
         start_mining=lambda: None,
+        logs_dir=None,
     )
 
     result = api.get_dashboard_info()
@@ -794,6 +870,7 @@ def test_window_api_open_in_browser_opens_dashboard_url(monkeypatch):
         config_path=None,
         needs_username=False,
         start_mining=lambda: None,
+        logs_dir=None,
     )
 
     api.open_in_browser()
@@ -814,6 +891,7 @@ def test_window_api_open_in_browser_noop_when_dashboard_unavailable(monkeypatch)
         config_path=None,
         needs_username=False,
         start_mining=lambda: None,
+        logs_dir=None,
     )
 
     api.open_in_browser()
@@ -834,12 +912,89 @@ def test_window_api_enable_dashboard_delegates_to_shared_helper(tmp_path, monkey
         config_path=config_path,
         needs_username=False,
         start_mining=lambda: None,
+        logs_dir=None,
     )
 
     result = api.enable_dashboard()
 
     assert calls == [config_path]
     assert result == {"success": True, "message": "Saved."}
+
+
+def test_open_folder_creates_missing_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(windows_launcher.os, "name", "posix")
+    target = tmp_path / "not-created-yet"
+
+    windows_launcher._open_folder(target)
+
+    assert target.is_dir()
+
+
+def test_open_folder_launches_explorer_on_windows(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(windows_launcher.os, "name", "nt")
+    monkeypatch.setattr(windows_launcher.os, "startfile", calls.append, raising=False)
+    target = tmp_path / "config"
+
+    windows_launcher._open_folder(target)
+
+    # Checked by name rather than full equality/string form: patching
+    # os.name to "nt" also flips pathlib's own Path() dispatch to
+    # WindowsPath for the remainder of this test, which renders with
+    # backslashes - a mismatch against the original PosixPath that has
+    # nothing to do with the behavior actually under test here.
+    assert len(calls) == 1
+    assert calls[0].name == "config"
+
+
+def test_open_folder_swallows_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(windows_launcher.os, "name", "nt")
+    monkeypatch.setattr(
+        windows_launcher.os,
+        "startfile",
+        lambda _path: (_ for _ in ()).throw(OSError("no shell available")),
+        raising=False,
+    )
+
+    windows_launcher._open_folder(tmp_path / "config")  # must not raise
+
+
+def test_window_api_open_config_folder_opens_configs_parent_directory(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(windows_launcher, "_open_folder", lambda path: calls.append(path))
+    config_path = tmp_path / "config" / "config.py"
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=config_path,
+        needs_username=False,
+        start_mining=lambda: None,
+        logs_dir=tmp_path / "logs",
+    )
+
+    api.open_config_folder()
+
+    assert calls == [config_path.parent]
+
+
+def test_window_api_open_logs_folder_opens_the_logs_directory(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(windows_launcher, "_open_folder", lambda path: calls.append(path))
+    logs_dir = tmp_path / "logs"
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=tmp_path / "config" / "config.py",
+        needs_username=False,
+        start_mining=lambda: None,
+        logs_dir=logs_dir,
+    )
+
+    api.open_logs_folder()
+
+    assert calls == [logs_dir]
 
 
 def test_window_api_get_setup_info_reflects_constructor_flag():
@@ -850,6 +1005,7 @@ def test_window_api_get_setup_info_reflects_constructor_flag():
         config_path=None,
         needs_username=True,
         start_mining=lambda: None,
+        logs_dir=None,
     )
 
     assert api.get_setup_info() == {"needs_username": True}
@@ -868,6 +1024,7 @@ def test_window_api_submit_username_saves_and_starts_mining(tmp_path):
         config_path=config_path,
         needs_username=True,
         start_mining=lambda: started.append(True),
+        logs_dir=None,
     )
 
     result = api.submit_username(_REAL_USERNAME)
@@ -891,6 +1048,7 @@ def test_window_api_submit_username_reports_invalid_username_without_starting(tm
         config_path=config_path,
         needs_username=True,
         start_mining=lambda: started.append(True),
+        logs_dir=None,
     )
 
     result = api.submit_username("not a valid username!!!")
@@ -920,6 +1078,7 @@ def test_launch_shell_surfaces_missing_pywebview(monkeypatch):
             Path(".shell_analytics_prompt_shown"),
             False,
             lambda: None,
+            None,
         )
 
 
@@ -1067,8 +1226,12 @@ class _FakeWebview:
 
     def __init__(self):
         self.window = _FakeWindow()
+        self.create_window_args = None
+        self.create_window_kwargs = None
 
     def create_window(self, *args, **kwargs):
+        self.create_window_args = args
+        self.create_window_kwargs = kwargs
         return self.window
 
     def start(self, func=None):
@@ -1085,6 +1248,31 @@ def _patch_fake_webview(monkeypatch, fake_webview):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def test_launch_shell_enables_text_selection_and_shows_version_in_title(
+    tmp_path, monkeypatch
+):
+    # text_select defaults to False in pywebview, which would make the
+    # Console tab's whole point - reading and copying logs - impossible.
+    fake_webview = _FakeWebview()
+    _patch_fake_webview(monkeypatch, fake_webview)
+    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+
+    windows_launcher.launch_shell(
+        None,
+        windows_launcher.ConsoleBuffer(),
+        None,
+        _FakeMinerThread(alive=True),
+        tmp_path / "config.py",
+        tmp_path / ".shell_analytics_prompt_shown",
+        False,
+        lambda: None,
+        None,
+    )
+
+    assert fake_webview.create_window_kwargs["text_select"] is True
+    assert windows_launcher.__version__ in fake_webview.create_window_args[0]
 
 
 def test_launch_shell_wires_close_confirmation_handler(tmp_path, monkeypatch):
@@ -1107,6 +1295,7 @@ def test_launch_shell_wires_close_confirmation_handler(tmp_path, monkeypatch):
         tmp_path / ".shell_analytics_prompt_shown",
         False,
         lambda: None,
+        None,
     )
 
     assert callable(fake_webview.window.events.closing.handler)
@@ -1139,6 +1328,7 @@ def test_launch_shell_runs_analytics_prompt_check_via_start_callback(tmp_path, m
         prompt_marker,
         False,
         lambda: None,
+        None,
     )
 
     assert calls == [(fake_webview.window, None, config_path, prompt_marker)]
@@ -1164,6 +1354,7 @@ def test_launch_shell_skips_analytics_prompt_while_username_setup_pending(tmp_pa
         tmp_path / ".shell_analytics_prompt_shown",
         True,
         lambda: None,
+        None,
     )
 
 
@@ -1411,6 +1602,7 @@ def test_main_installer_style_disabled_config_shows_disabled_flow_end_to_end(
         prompt_marker,
         needs_username,
         start_mining,
+        logs_dir,
     ):
         shell_calls.append((dashboard_info, initial_tab))
         # Exercises the real prompt-gating logic (not just that launch_shell

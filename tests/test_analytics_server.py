@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     AnalyticsServer,
     MAX_LOG_TAIL_BYTES,
+    SHELL_BYPASS_COOKIE,
+    SHELL_BYPASS_TOKEN_ENV_VAR,
     TTLResponseCache,
     UPDATE_DISMISSAL_COOKIE,
     bounded_log_start,
@@ -320,6 +322,59 @@ def test_authenticated_config_writes_reach_the_endpoint(tmp_path, monkeypatch):
     )
 
     assert response.status_code == 200
+
+
+def test_shell_bypass_token_query_param_authenticates_and_sets_cookie(tmp_path, monkeypatch):
+    # Simulates the Windows desktop shell's embedded dashboard iframe: it
+    # can't attach a custom Authorization header, so it authenticates once
+    # via a query param carrying a token only its own launcher process set.
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    monkeypatch.setenv(SHELL_BYPASS_TOKEN_ENV_VAR, "shell-secret")
+    server = AnalyticsServer(username="user", password="secret")
+    client = server.app.test_client()
+
+    response = client.get("/streamers?shell_token=shell-secret")
+
+    assert response.status_code == 200
+    assert response.headers.get_all("Set-Cookie")
+    assert f"{SHELL_BYPASS_COOKIE}=shell-secret" in response.headers["Set-Cookie"]
+
+
+def test_shell_bypass_cookie_alone_authenticates_later_requests(tmp_path, monkeypatch):
+    # The dashboard's own JS makes many same-origin fetch() calls that never
+    # repeat the query param - only the cookie set on the first navigation
+    # keeps those authenticated.
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    monkeypatch.setenv(SHELL_BYPASS_TOKEN_ENV_VAR, "shell-secret")
+    server = AnalyticsServer(username="user", password="secret")
+    client = server.app.test_client()
+    client.set_cookie(SHELL_BYPASS_COOKIE, "shell-secret")
+
+    response = client.get("/streamers")
+
+    assert response.status_code == 200
+
+
+def test_shell_bypass_wrong_token_still_requires_basic_auth(monkeypatch):
+    monkeypatch.setenv(SHELL_BYPASS_TOKEN_ENV_VAR, "shell-secret")
+    server = AnalyticsServer(username="user", password="secret")
+    client = server.app.test_client()
+
+    response = client.get("/streamers?shell_token=wrong-guess")
+
+    assert response.status_code == 401
+
+
+def test_shell_bypass_unset_never_authenticates_even_with_matching_query(monkeypatch):
+    # Docker and a plain source checkout never set this env var - a client
+    # guessing the query param name must gain nothing there.
+    monkeypatch.delenv(SHELL_BYPASS_TOKEN_ENV_VAR, raising=False)
+    server = AnalyticsServer(username="user", password="secret")
+    client = server.app.test_client()
+
+    response = client.get("/streamers?shell_token=anything")
+
+    assert response.status_code == 401
 
 
 def test_bounded_log_start_honors_smaller_initial_tail():

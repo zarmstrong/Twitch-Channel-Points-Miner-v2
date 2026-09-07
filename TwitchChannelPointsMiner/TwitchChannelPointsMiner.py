@@ -515,6 +515,21 @@ class TwitchChannelPointsMiner:
         logger.info(GITHUB_REPOSITORY_URL)
         self.__check_for_update()
 
+        self._register_signal_handlers()
+
+    def _register_signal_handlers(self):
+        """Install SIGINT/SIGSEGV/SIGTERM handlers so Ctrl+C (or an external
+        termination signal) triggers a graceful shutdown via self.end().
+
+        signal.signal() raises ValueError outside the main thread of the
+        main interpreter - e.g. the Windows desktop shell runs the miner on
+        a background thread so pywebview's blocking loop can own the main
+        thread. There's simply no signal to catch in that case (window-close
+        handling there is done separately, via pywebview's own close event),
+        so this is a no-op instead of crashing.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            return
         for sign in [signal.SIGINT, signal.SIGSEGV, signal.SIGTERM]:
             signal.signal(sign, self.end)
 

@@ -45,7 +45,9 @@
             flex: 1;
         }
 
-        #shell-open-browser {
+        #shell-open-browser,
+        #shell-open-config-folder,
+        #shell-open-logs-folder {
             background: transparent !important;
             color: #9aa0c0 !important;
             text-decoration: underline;
@@ -197,6 +199,8 @@
         <button id="shell-tab-console" type="button">Console</button>
         <span class="spacer"></span>
         <button id="shell-open-browser" type="button">Open in browser</button>
+        <button id="shell-open-config-folder" type="button">Open config folder</button>
+        <button id="shell-open-logs-folder" type="button">Open logs folder</button>
     </div>
 
     <div id="dashboard-panel" class="shell-panel">
@@ -241,6 +245,12 @@
         });
         document.getElementById('shell-open-browser').addEventListener('click', function () {
             if (window.pywebview) window.pywebview.api.open_in_browser();
+        });
+        document.getElementById('shell-open-config-folder').addEventListener('click', function () {
+            if (window.pywebview) window.pywebview.api.open_config_folder();
+        });
+        document.getElementById('shell-open-logs-folder').addEventListener('click', function () {
+            if (window.pywebview) window.pywebview.api.open_logs_folder();
         });
 
         document.getElementById('enable-dashboard-button').addEventListener('click', function () {
