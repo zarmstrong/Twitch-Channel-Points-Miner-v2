@@ -1,4 +1,5 @@
 import builtins
+import http.server
 import os
 import socket
 import stat
@@ -745,31 +746,75 @@ def test_tee_stream_tolerates_missing_underlying_stream():
     assert lines == ["hello\n"]
 
 
-def test_wait_until_reachable_detects_open_port():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(("127.0.0.1", 0))
-    server.listen(1)
-    host, port = server.getsockname()
+def _start_http_server(handler_cls):
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+class _OkHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+class _UnauthorizedHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(401)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+def test_wait_until_dashboard_ready_true_when_server_answers_200():
+    server, thread = _start_http_server(_OkHandler)
     try:
+        host, port = server.server_address
         assert (
-            windows_launcher._wait_until_reachable(host, port, timeout=1, interval=0.05)
+            windows_launcher._wait_until_dashboard_ready(
+                f"http://{host}:{port}/", timeout=1, interval=0.05
+            )
             is True
         )
     finally:
-        server.close()
+        server.shutdown()
+        thread.join()
 
 
-def test_wait_until_reachable_times_out_when_nothing_listening():
+def test_wait_until_dashboard_ready_times_out_when_nothing_listening():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
         _host, closed_port = probe.getsockname()
 
     assert (
-        windows_launcher._wait_until_reachable(
-            "127.0.0.1", closed_port, timeout=0.2, interval=0.05
+        windows_launcher._wait_until_dashboard_ready(
+            f"http://127.0.0.1:{closed_port}/", timeout=0.2, interval=0.05
         )
         is False
     )
+
+
+def test_wait_until_dashboard_ready_false_when_a_different_server_answers():
+    # A previous copy of this app (or anything else) holding the port with
+    # its own auth would answer with a real HTTP response, just not a 200
+    # for *this* run's token - that must count as "not ready", not success.
+    server, thread = _start_http_server(_UnauthorizedHandler)
+    try:
+        host, port = server.server_address
+        assert (
+            windows_launcher._wait_until_dashboard_ready(
+                f"http://{host}:{port}/", timeout=0.2, interval=0.05
+            )
+            is False
+        )
+    finally:
+        server.shutdown()
+        thread.join()
 
 
 def test_window_api_get_console_tail_delegates_to_buffer():
@@ -835,8 +880,8 @@ def test_window_api_get_dashboard_info_waits_for_port_then_returns_url(monkeypat
     waited = []
     monkeypatch.setattr(
         windows_launcher,
-        "_wait_until_reachable",
-        lambda host, port: waited.append((host, port)) or True,
+        "_wait_until_dashboard_ready",
+        lambda url: waited.append(url) or True,
     )
     dashboard_info = {"host": "127.0.0.1", "port": 5000, "url": "http://127.0.0.1:5000/"}
     api = windows_launcher.WindowApi(
@@ -851,12 +896,34 @@ def test_window_api_get_dashboard_info_waits_for_port_then_returns_url(monkeypat
 
     result = api.get_dashboard_info()
 
-    assert waited == [("127.0.0.1", 5000)]
+    assert waited == ["http://127.0.0.1:5000/"]
     assert result == {
         "url": "http://127.0.0.1:5000/",
         "initial_tab": "config",
         "enabled": True,
     }
+
+
+def test_window_api_get_dashboard_info_reports_unavailable_when_never_ready(monkeypatch):
+    monkeypatch.setattr(
+        windows_launcher, "_wait_until_dashboard_ready", lambda url: False
+    )
+    dashboard_info = {"host": "127.0.0.1", "port": 5000, "url": "http://127.0.0.1:5000/"}
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info,
+        initial_tab="config",
+        config_path=None,
+        needs_username=False,
+        start_mining=lambda: None,
+        logs_dir=None,
+    )
+
+    result = api.get_dashboard_info()
+
+    assert result["url"] is None
+    assert result["enabled"] is True
+    assert result["message"]
 
 
 def test_window_api_open_in_browser_opens_dashboard_url(monkeypatch):

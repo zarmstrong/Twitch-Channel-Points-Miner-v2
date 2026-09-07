@@ -214,8 +214,8 @@
         </div>
         <div id="dashboard-message">
             <p>The dashboard isn't available yet.</p>
-            <p>Check the Console tab for details, or enable analytics by setting
-                <code>enable_analytics</code> to <code>True</code> in <code>MINER_CONFIG</code> and
+            <p id="dashboard-message-detail">Check the Console tab for details, or enable analytics by
+                setting <code>enable_analytics</code> to <code>True</code> in <code>MINER_CONFIG</code> and
                 configuring <code>ANALYTICS_CONFIG</code> in <code>config\config.py</code>.</p>
         </div>
         <iframe id="dashboard-frame" style="display: none;"></iframe>
@@ -294,6 +294,17 @@
             });
         }
 
+        var defaultDashboardMessageDetail =
+            document.getElementById('dashboard-message-detail').textContent;
+
+        function showDashboardMessage(detail) {
+            // `detail` can include arbitrary error text (e.g. a socket
+            // error), so never treat it as HTML.
+            document.getElementById('dashboard-message-detail').textContent =
+                detail || defaultDashboardMessageDetail;
+            document.getElementById('dashboard-message').style.display = 'block';
+        }
+
         function loadDashboard() {
             if (dashboardRequested) return;
             dashboardRequested = true;
@@ -312,10 +323,10 @@
                     // the generic "unavailable" fallback below.
                     document.getElementById('analytics-disabled-panel').style.display = 'block';
                 } else {
-                    document.getElementById('dashboard-message').style.display = 'block';
+                    showDashboardMessage(info && info.message);
                 }
             }).catch(function () {
-                document.getElementById('dashboard-message').style.display = 'block';
+                showDashboardMessage();
             });
         }
 

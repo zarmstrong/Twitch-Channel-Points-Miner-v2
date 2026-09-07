@@ -7,10 +7,11 @@ import ctypes  # cross-platform stdlib module; only .windll is Windows-only (gua
 import os
 import secrets
 import shutil
-import socket
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from collections import deque
 from pathlib import Path
@@ -350,16 +351,30 @@ def install_console_capture(buffer):
     sys.stderr = _TeeStream(buffer, sys.stderr)
 
 
-def _wait_until_reachable(host, port, timeout=10.0, interval=0.2):
+def _wait_until_dashboard_ready(url, timeout=10.0, interval=0.2):
     """Give the analytics server, started on a background thread, a moment
-    to bind its port before the shell tries to load it."""
+    to bind its port before the shell tries to load it - and confirm it's
+    actually *this run's* server answering, not merely something reachable
+    on that port.
+
+    A bare TCP connect can't tell those apart: if a previous copy of this
+    app is still running in the background and still holding the port, it
+    would accept the connection just fine, but it has its own per-launch
+    auth-bypass token (see main()) and would reject `url`'s token, leaving
+    the shell to embed a confusing "Authentication required" page instead
+    of the dashboard. Requiring an actual HTTP 200 for `url` (which already
+    carries this run's token, if any) treats that case the same as nothing
+    being there at all - both are "not ready" - rather than as a success.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with socket.create_connection((host, port), timeout=interval):
-                return True
-        except OSError:
-            time.sleep(interval)
+            with urllib.request.urlopen(url, timeout=interval) as response:
+                if response.status == 200:
+                    return True
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
+        time.sleep(interval)
     return False
 
 
@@ -509,9 +524,20 @@ class WindowApi:
     def get_dashboard_info(self):
         if not self._dashboard_info:
             return {"url": None, "enabled": False}
-        _wait_until_reachable(self._dashboard_info["host"], self._dashboard_info["port"])
+        url = _dashboard_url_with_bypass(self._dashboard_info["url"])
+        if not _wait_until_dashboard_ready(url):
+            return {
+                "url": None,
+                "enabled": True,
+                "message": (
+                    "The dashboard didn't respond as expected. Another "
+                    "program - or a previous copy of this app still running "
+                    "in the background - may already be using its port. "
+                    "Check the Console tab for details."
+                ),
+            }
         return {
-            "url": _dashboard_url_with_bypass(self._dashboard_info["url"]),
+            "url": url,
             "initial_tab": self._initial_tab,
             "enabled": True,
         }

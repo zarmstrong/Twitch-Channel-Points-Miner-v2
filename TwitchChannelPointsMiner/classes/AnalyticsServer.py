@@ -795,17 +795,38 @@ class AnalyticsServer(Thread):
         )
 
     def run(self):
+        # Production WSGI server instead of Flask's development server.
+        # create_server() does the actual socket bind - split out from
+        # waitress.serve() (which does create_server(...).run() in one call)
+        # so a failed bind can be reported clearly instead of only showing up
+        # as an uncaught traceback in "Exception in thread Analytics Thread",
+        # and so the "running" log line below reflects a real success rather
+        # than merely an intent that might fail moments later.
+        from waitress.server import create_server
+
+        try:
+            server = create_server(
+                self.app,
+                host=self.host,
+                port=self.port,
+                threads=8,
+                ident=None,
+            )
+        except OSError as error:
+            logger.error(
+                f"Could not start the analytics dashboard on "
+                f"http://{self.host}:{self.port}/ ({error}). Another program "
+                "(or a previous copy of this app still running in the "
+                "background) is probably already using that port - close it, "
+                "or set a different 'port' under ANALYTICS_CONFIG in your "
+                "config file and restart. Mining will continue without the "
+                "dashboard.",
+                extra={"emoji": ":warning:"},
+            )
+            return
+
         logger.info(
             f"Analytics running on http://{self.host}:{self.port}/",
             extra={"emoji": ":globe_with_meridians:"},
         )
-        # Production WSGI server instead of Flask's development server.
-        from waitress import serve
-
-        serve(
-            self.app,
-            host=self.host,
-            port=self.port,
-            threads=8,
-            ident=None,
-        )
+        server.run()
