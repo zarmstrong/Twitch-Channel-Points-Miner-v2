@@ -1038,7 +1038,14 @@ def launch_shell(
             # normal launch once one is set.
             _maybe_prompt_to_enable_analytics(window, dashboard_info, config_path, prompt_marker)
 
-    webview.start(_on_started)
+    # Without this, pywebview falls back to extracting whatever icon
+    # Windows associates with sys.executable at runtime - fragile for a
+    # frozen onefile build and simply wrong (python.exe's icon) when run
+    # unfrozen from source. Passing it explicitly is the documented,
+    # reliable way to get the app's own icon on the actual running window
+    # (taskbar/Alt-Tab), separate from the exe *file's* icon in Explorer,
+    # which PyInstaller's --icon flag in build_windows.bat already covers.
+    webview.start(_on_started, icon=str(bundled_file(os.path.join("assets", _TRAY_ICON_FILE))))
 
 
 def self_test():

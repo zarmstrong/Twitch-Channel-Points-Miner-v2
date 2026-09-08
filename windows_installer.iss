@@ -65,6 +65,22 @@ const
 
 var
   ConfigurePage: TInputQueryWizardPage;
+  LegacyConfigNoticeShown: Boolean;
+
+// True when a real config.py from a previous install already sits beside
+// the exe (e.g. a portable build's data folder, or an earlier "standard"
+// install) in the directory being installed into. windows_launcher.py's
+// own first-run migration (_migrate_legacy_windows_data) always carries
+// that file forward into the per-user AppData location and overwrites
+// whatever sits there - including a config.py this installer's own
+// CustomizeStarterConfig just wrote - so prefilling one here would only
+// be silently discarded moments later. Checked against {app}\config.py
+// specifically (not just any file in {app}) because that exact path is
+// what the migration step treats as authoritative.
+function HasLegacyConfigInAppDir(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\config\config.py'));
+end;
 
 function EscapePythonString(Value: String): String;
 begin
@@ -212,5 +228,25 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := (PageID = ConfigurePage.ID) and
-    (not WizardIsTaskSelected('configure'));
+    ((not WizardIsTaskSelected('configure')) or HasLegacyConfigInAppDir());
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  // Shown once, when the wizard reaches the tasks page immediately before
+  // the (about-to-be-skipped) prefill page, so the user understands why
+  // it's missing rather than wondering whether their "Prefill a new
+  // configuration" task selection was just ignored.
+  if (CurPageID = wpSelectTasks) and (not LegacyConfigNoticeShown) and
+     HasLegacyConfigInAppDir() then
+  begin
+    LegacyConfigNoticeShown := True;
+    MsgBox(
+      'An existing configuration was found in ' + ExpandConstant('{app}') + '.' +
+      #13#10#13#10 +
+      'It will be moved to ' + ExpandConstant('{localappdata}\TwitchChannelPointsMiner') +
+      ' and used automatically the first time the app runs, so the ' +
+      '"Configure the miner" step will be skipped.',
+      mbInformation, MB_OK);
+  end;
 end;

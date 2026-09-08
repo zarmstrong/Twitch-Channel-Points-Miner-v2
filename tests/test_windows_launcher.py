@@ -1765,13 +1765,15 @@ class _FakeWebview:
         self.window = _FakeWindow()
         self.create_window_args = None
         self.create_window_kwargs = None
+        self.start_icon = None
 
     def create_window(self, *args, **kwargs):
         self.create_window_args = args
         self.create_window_kwargs = kwargs
         return self.window
 
-    def start(self, func=None):
+    def start(self, func=None, icon=None):
+        self.start_icon = icon
         if func is not None:
             func()
 
@@ -1810,6 +1812,35 @@ def test_launch_shell_enables_text_selection_and_shows_version_in_title(
 
     assert fake_webview.create_window_kwargs["text_select"] is True
     assert windows_launcher.__version__ in fake_webview.create_window_args[0]
+
+
+def test_launch_shell_passes_the_bundled_icon_to_webview_start(tmp_path, monkeypatch):
+    # Without this, pywebview falls back to extracting whatever icon
+    # Windows associates with sys.executable at runtime, which is generic
+    # when run unfrozen from source and unreliable in a frozen onefile
+    # build - the running window's icon must come from the bundled .ico
+    # explicitly, not that fallback.
+    fake_webview = _FakeWebview()
+    _patch_fake_webview(monkeypatch, fake_webview)
+    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+
+    windows_launcher.launch_shell(
+        None,
+        windows_launcher.ConsoleBuffer(),
+        None,
+        _FakeMinerThread(alive=True),
+        tmp_path / "config.py",
+        tmp_path / ".shell_analytics_prompt_shown",
+        False,
+        lambda: None,
+        None,
+    )
+
+    assert fake_webview.start_icon == str(
+        windows_launcher.bundled_file(
+            os.path.join("assets", windows_launcher._TRAY_ICON_FILE)
+        )
+    )
 
 
 def test_launch_shell_wires_close_confirmation_handler(tmp_path, monkeypatch):
