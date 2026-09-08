@@ -54,6 +54,15 @@
             font-weight: normal !important;
         }
 
+        #shell-autostart-label {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            color: #9aa0c0;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
         .shell-panel {
             position: absolute;
             top: 38px;
@@ -291,6 +300,9 @@
         <button id="shell-tab-dashboard" class="active" type="button">Dashboard</button>
         <button id="shell-tab-console" type="button">Console</button>
         <span class="spacer"></span>
+        <label id="shell-autostart-label" hidden>
+            <input type="checkbox" id="shell-autostart-checkbox"> Start on Windows login
+        </label>
         <button id="shell-open-browser" type="button">Open in browser</button>
         <button id="shell-open-config-folder" type="button">Open config folder</button>
         <button id="shell-open-logs-folder" type="button">Open logs folder</button>
@@ -344,6 +356,32 @@
         });
         document.getElementById('shell-open-logs-folder').addEventListener('click', function () {
             if (window.pywebview) window.pywebview.api.open_logs_folder();
+        });
+
+        // Hidden by default - only the installed (frozen) build has a
+        // stable exe path to register for autostart, see get_autostart_info.
+        var autostartCheckbox = document.getElementById('shell-autostart-checkbox');
+        if (window.pywebview) {
+            window.pywebview.api.get_autostart_info().then(function (info) {
+                if (info && info.available) {
+                    document.getElementById('shell-autostart-label').hidden = false;
+                    autostartCheckbox.checked = !!info.enabled;
+                }
+            });
+        }
+        autostartCheckbox.addEventListener('change', function () {
+            var checkbox = autostartCheckbox;
+            var wanted = checkbox.checked;
+            checkbox.disabled = true;
+            window.pywebview.api.set_autostart(wanted).then(function (result) {
+                if (!result || !result.success) {
+                    checkbox.checked = !wanted;
+                }
+            }).catch(function () {
+                checkbox.checked = !wanted;
+            }).finally(function () {
+                checkbox.disabled = false;
+            });
         });
 
         document.getElementById('enable-dashboard-button').addEventListener('click', function () {

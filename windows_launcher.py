@@ -65,6 +65,10 @@ DEFAULT_ANALYTICS_PORT = 54455
 # below, never as a safety gate - see that function's docstring for why.
 _ANALYTICS_DISABLED_MARKER = "'enable_analytics': False,"
 _PLACEHOLDER_USERNAME = "your-twitch-username"
+_TRAY_ICON_FILE = "twitch-miner.ico"
+_AUTOSTART_VALUE_NAME = "TwitchChannelPointsMiner"
+_AUTOSTART_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_START_MINIMIZED_FLAG = "--start-minimized"
 
 
 def application_directory():
@@ -198,7 +202,16 @@ def _migrate_legacy_windows_data(exe_dir, standard_dir):
     config.py no longer exists at its old path at all, so re-checking that
     on a later run would look identical to "nothing to migrate", and this
     must not run twice regardless (a second run would archive the fresh
-    standard-location data instead of the real legacy data).
+    standard-location data instead of the real legacy data). For the same
+    reason, "is there anything to do" also can't be answered by checking for
+    just config.py: an earlier attempt can fail partway through (e.g.
+    "config" moved, then "cookies" hits a locked file) without ever writing
+    the marker, at which point config.py is already gone from its old path
+    even though cookies/analytics/logs are still stranded there - so this
+    also treats a config-legacy folder that exists without a .migrated
+    marker as an interrupted migration to resume, regardless of what's left
+    at the old path. The per-item moves/copies below are all guarded by
+    existence checks, so resuming is safe even if some items already moved.
 
     Returns None if there was nothing to do, or a message describing what
     happened (success or partial failure) for a one-time notice to the user.
@@ -206,17 +219,23 @@ def _migrate_legacy_windows_data(exe_dir, standard_dir):
     legacy_root = exe_dir / "config-legacy"
     if (legacy_root / ".migrated").is_file():
         return None
-    if not (exe_dir / "config" / "config.py").is_file():
+    has_legacy_source = any(
+        (exe_dir / name).is_dir()
+        for name in _LEGACY_DIRS_CARRY_FORWARD + _LEGACY_DIRS_ARCHIVE_ONLY
+    )
+    if not has_legacy_source and not legacy_root.exists():
         return None  # nothing to migrate - a fresh standard install
 
     try:
         legacy_root.mkdir(parents=True, exist_ok=True)
         for name in _LEGACY_DIRS_CARRY_FORWARD + _LEGACY_DIRS_ARCHIVE_ONLY:
             source = exe_dir / name
-            if not source.is_dir():
-                continue
             archived = legacy_root / name
-            if not archived.exists():
+            # `source` may already be gone even on a first pass through this
+            # item within a resumed migration (see the docstring above) - the
+            # carry-forward copy below must still run off `archived` in that
+            # case, not be skipped just because there's nothing left to move.
+            if source.is_dir() and not archived.exists():
                 shutil.move(str(source), str(archived))
             if name in _LEGACY_DIRS_CARRY_FORWARD:
                 destination = standard_dir / name
@@ -584,6 +603,102 @@ def _dashboard_url_with_bypass(url):
     return f"{url}{separator}shell_token={token}"
 
 
+def _build_tray_icon(on_show, on_quit):
+    """Build a (not-yet-running) system tray icon with Show/Quit actions.
+
+    Imports pystray/Pillow lazily, the same way launch_shell() imports
+    webview lazily - so this module stays importable on platforms/test
+    environments where the Windows-only tray dependency isn't installed.
+    Any failure here (missing dependency, unreadable icon, no tray support
+    on this desktop) is the caller's signal to fall back to the older
+    confirm-on-close behavior rather than leave the app unclosable.
+    """
+    import pystray
+    from PIL import Image
+
+    image = Image.open(bundled_file(os.path.join("assets", _TRAY_ICON_FILE)))
+    menu = pystray.Menu(
+        pystray.MenuItem("Show", lambda icon, item: on_show()),
+        pystray.MenuItem("Quit", lambda icon, item: on_quit()),
+    )
+    return pystray.Icon("TwitchChannelPointsMiner", image, "Twitch Channel Points Miner", menu)
+
+
+def _make_hide_to_tray_handler(window):
+    """Build a `window.events.closing` handler that hides the window to the
+    tray instead of closing it - mining is unaffected, so unlike the older
+    confirm-on-close handler this never needs to ask anything. Quitting for
+    real now only ever happens via the tray icon's own Quit action (see
+    launch_shell), which is where that confirmation moved to.
+    """
+
+    def on_closing():
+        window.hide()
+        return False
+
+    return on_closing
+
+
+def _autostart_command():
+    """Command line to register for "start on Windows login" - only
+    meaningful for a frozen (PyInstaller) build; a source checkout has no
+    stable double-clickable entry point to relaunch, so callers gate the
+    whole feature on this.
+    """
+    return f'"{sys.executable}" {_START_MINIMIZED_FLAG}'
+
+
+def is_autostart_enabled():
+    """Whether this exe is currently registered to launch at Windows login,
+    via the per-user Run key (no admin rights required, unlike the
+    all-users equivalent)."""
+    if not getattr(sys, "frozen", False):
+        return False
+    try:
+        import winreg
+    except ImportError:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY_PATH) as key:
+            value, _type = winreg.QueryValueEx(key, _AUTOSTART_VALUE_NAME)
+    except OSError:
+        return False
+    return value == _autostart_command()
+
+
+def set_autostart_enabled(enabled):
+    """Add or remove the per-user Run key entry that launches this exe
+    (minimized, straight to the tray - see _START_MINIMIZED_FLAG) at
+    Windows login.
+
+    Returns (success, message) - meant to be shown to the user as-is, the
+    same contract as _enable_dashboard_from_shell.
+    """
+    if not getattr(sys, "frozen", False):
+        return False, "Starting on login is only available in the installed app."
+    try:
+        import winreg
+    except ImportError:
+        return False, "Windows registry access is unavailable."
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY_PATH, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            if enabled:
+                winreg.SetValueEx(
+                    key, _AUTOSTART_VALUE_NAME, 0, winreg.REG_SZ, _autostart_command()
+                )
+            else:
+                try:
+                    winreg.DeleteValue(key, _AUTOSTART_VALUE_NAME)
+                except FileNotFoundError:
+                    pass
+    except OSError as error:
+        return False, f"Could not update Windows startup settings: {error}"
+    return True, "Saved."
+
+
 class WindowApi:
     """Bridge exposed to the shell's JavaScript as `window.pywebview.api`."""
 
@@ -672,6 +787,16 @@ class WindowApi:
     def open_logs_folder(self):
         _open_folder(self._logs_dir)
 
+    def get_autostart_info(self):
+        return {
+            "available": bool(getattr(sys, "frozen", False)),
+            "enabled": is_autostart_enabled(),
+        }
+
+    def set_autostart(self, enabled):
+        success, message = set_autostart_enabled(bool(enabled))
+        return {"success": success, "message": message}
+
 
 def _open_folder(path):
     """Best-effort: open `path` in the OS file manager, creating it first if
@@ -695,6 +820,22 @@ def _open_folder(path):
         pass
 
 
+def _run_miner_thread(argv, on_miner_ready):
+    """Thread target wrapping runner_main() the way runner.cli() wraps it for
+    the normal synchronous entry point - without this, a RuntimeError raised
+    before mining starts (e.g. failure to create the default config) would
+    propagate unhandled off the main thread and never reach the user: the
+    shell window would just sit there with mining silently never started.
+    """
+    try:
+        runner_main(argv, on_miner_ready=on_miner_ready)
+    except RuntimeError as error:
+        print(f"ERROR: {error}", file=sys.stderr, flush=True)
+        _show_fatal_error_message(
+            f"Twitch Channel Points Miner failed to start:\n\n{error}"
+        )
+
+
 class _MinerThreadHandle:
     """Shares a reference to the miner thread between the close-confirmation
     handler below and the first-run setup flow, which defers actually
@@ -705,9 +846,13 @@ class _MinerThreadHandle:
 
     def __init__(self):
         self.thread = None
+        self.miner = None
 
     def is_alive(self):
         return self.thread is not None and self.thread.is_alive()
+
+    def set_miner(self, miner):
+        self.miner = miner
 
 
 def _make_close_confirmation_handler(window, miner_thread):
@@ -727,7 +872,7 @@ def _make_close_confirmation_handler(window, miner_thread):
         if not miner_thread.is_alive():
             return True
         try:
-            return window.create_confirmation_dialog(
+            confirmed = window.create_confirmation_dialog(
                 "Stop mining?",
                 "Closing this window will stop mining. Are you sure?",
             )
@@ -735,8 +880,37 @@ def _make_close_confirmation_handler(window, miner_thread):
             # If the dialog itself can't be shown, err on the side of NOT
             # silently stopping an unattended miner.
             return False
+        if confirmed:
+            _stop_miner_gracefully(miner_thread)
+        return confirmed
 
     return on_closing
+
+
+def _stop_miner_gracefully(miner_thread_handle):
+    """Runs the same clean shutdown a SIGINT/SIGTERM would have triggered
+    (IRC chat leave, websocket pool teardown, watcher-thread joins, final
+    report) before the window is allowed to close.
+
+    Needed because the miner runs on a background daemon thread here, and
+    TwitchChannelPointsMiner._register_signal_handlers() is a deliberate
+    no-op off the main thread - so nothing else ever calls end() for this
+    shell. Runs on the GUI thread while the miner thread is mid-loop; end()
+    already guards its state (streamer mutex checks, running flags) for
+    exactly this kind of concurrent call. Its trailing sys.exit(0) is caught
+    below since it would only ever unwind this thread's dialog handler, not
+    the process - the process exits normally once the window finishes
+    closing.
+    """
+    miner = getattr(miner_thread_handle, "miner", None)
+    if miner is None:
+        return
+    try:
+        miner.end(None, None)
+    except SystemExit:
+        pass
+    except Exception as error:
+        print(f"Error while stopping the miner gracefully: {error}", file=sys.stderr)
 
 
 def launch_shell(
@@ -749,6 +923,7 @@ def launch_shell(
     needs_username,
     start_mining,
     logs_dir,
+    start_minimized=False,
 ):
     """Open the two-tab desktop shell (Dashboard + Console) - or, on a first
     run with no configured Twitch username yet, a setup screen that
@@ -785,8 +960,36 @@ def launch_shell(
         # instead of a separate window, so that default would defeat its
         # purpose.
         text_select=True,
+        # Start-on-login launches straight to the tray rather than popping a
+        # window on every boot - but never while first-run setup still needs
+        # to collect a username (see main()'s start_minimized gating).
+        hidden=start_minimized,
     )
-    window.events.closing += _make_close_confirmation_handler(window, miner_thread)
+
+    tray_icon = None
+
+    def _quit_from_tray():
+        # Reuses the same confirm-then-stop-mining logic the close button
+        # used to run directly - it now only runs from the tray's Quit
+        # action, since closing the window itself just hides it (see below).
+        if _make_close_confirmation_handler(window, miner_thread)():
+            if tray_icon is not None:
+                tray_icon.stop()
+            window.destroy()
+
+    try:
+        tray_icon = _build_tray_icon(window.show, _quit_from_tray)
+    except Exception:
+        # No tray support available (dependency missing, no desktop tray,
+        # bad icon, ...) - fall back to the older confirm-on-close behavior
+        # rather than leave the app with no way to quit at all.
+        tray_icon = None
+
+    if tray_icon is not None:
+        threading.Thread(target=tray_icon.run, name="Tray icon", daemon=True).start()
+        window.events.closing += _make_hide_to_tray_handler(window)
+    else:
+        window.events.closing += _make_close_confirmation_handler(window, miner_thread)
 
     def _on_started():
         # Dialogs (unlike event handlers) require the GUI loop that
@@ -850,12 +1053,19 @@ def main():
     config_dir, created = prepare_config(application_dir)
     config_path = config_dir / "config.py"
 
+    # A launcher-only flag (set by the "start on Windows login" registry
+    # entry / installer shortcut - see _autostart_command) - runner.py's own
+    # argument parser knows nothing about it, so it must never reach
+    # runner_main().
+    start_minimized = _START_MINIMIZED_FLAG in sys.argv[1:]
+    forwarded_args = [arg for arg in sys.argv[1:] if arg != _START_MINIMIZED_FLAG]
+
     argv = [
         "--config-dir",
         str(config_dir),
         "--legacy-runner",
         str(exe_dir / "run.py"),
-        *sys.argv[1:],
+        *forwarded_args,
     ]
     # A scripted/automation invocation (e.g. `--convert-only`) should behave
     # exactly as before: do the work and exit, with no desktop window - so
@@ -897,7 +1107,10 @@ def main():
 
     def start_mining():
         thread = threading.Thread(
-            target=runner_main, args=(argv,), name="Miner runner", daemon=True
+            target=_run_miner_thread,
+            args=(argv, miner_thread_handle.set_miner),
+            name="Miner runner",
+            daemon=True,
         )
         miner_thread_handle.thread = thread
         thread.start()
@@ -932,6 +1145,9 @@ def main():
             needs_username,
             start_mining,
             application_dir / "logs",
+            # First-run setup must still show the window regardless of how
+            # it was launched - there would be nothing to interact with.
+            start_minimized=start_minimized and not needs_username,
         )
     except Exception as error:
         # Covers a missing pywebview install, no WebView2 runtime, or any
@@ -950,7 +1166,7 @@ def main():
                 f"MINER_CONFIG in {config_path} and restart."
             )
         elif dashboard_info:
-            webbrowser.open(dashboard_info["url"])
+            webbrowser.open(_dashboard_url_with_bypass(dashboard_info["url"]))
         pause_for_first_run()
     else:
         if is_first_shell_launch:

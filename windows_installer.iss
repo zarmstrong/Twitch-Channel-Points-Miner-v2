@@ -20,6 +20,7 @@ OutputBaseFilename=TwitchChannelPointsMiner-{#MyAppVersion}-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=assets\twitch-miner.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -31,6 +32,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
+Name: "startuponlogin"; Description: "Start automatically when you sign in"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 Name: "configure"; Description: "Prefill a new configuration"; GroupDescription: "First run:"; Flags: checkedonce
 Name: "enableanalytics"; Description: "Enable the analytics dashboard (recommended)"; GroupDescription: "First run:"; Flags: checkedonce
 
@@ -46,6 +48,9 @@ Source: "config.example.py"; DestDir: "{localappdata}\TwitchChannelPointsMiner\c
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
+; Launches straight to the tray (--start-minimized) rather than popping the
+; window on every sign-in - see windows_launcher.py's _START_MINIMIZED_FLAG.
+Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--start-minimized"; WorkingDir: "{app}"; Tasks: startuponlogin
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
