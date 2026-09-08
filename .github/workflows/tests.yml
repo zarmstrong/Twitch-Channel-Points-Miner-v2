@@ -62,22 +62,28 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v6
 
-      # A freshly-built, unsigned PyInstaller onefile exe is exactly what
-      # Windows Defender's real-time/cloud scanning is most suspicious of -
-      # on this runner that can stall running the exe (not building it) for
-      # many minutes rather than the few seconds it takes normally. Excluding
-      # the checkout (where both the build and the smoke-test run) sidesteps
-      # that without weakening anything - this exclusion only exists for the
-      # lifetime of this ephemeral runner.
-      - name: Exclude workspace from Windows Defender scanning
-        shell: pwsh
-        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}"
-
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.14"
           cache: pip
+
+      # Confirmed root cause of a 10-15+ minute "Smoke-test Windows
+      # executable" hang: merely pip-installing Pillow (a new, unsigned
+      # compiled DLL landing in site-packages) is enough to trigger it -
+      # even a build that never bundles Pillow into the exe at all still
+      # hung. Excluding only the checkout dir (an earlier attempt) didn't
+      # help, because the DLL never lands there - it's under Python's own
+      # install directory. Exclude that too, plus pip's cache, so nothing
+      # written during dependency install or the build gets queued for
+      # Defender's real-time/cloud scan. Ephemeral runner, lifetime of this
+      # job only.
+      - name: Exclude workspace and Python installs from Windows Defender scanning
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath (Split-Path (python -c "import sys; print(sys.executable)"))
+          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\pip"
 
       - name: Install build dependencies
         shell: pwsh

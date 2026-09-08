@@ -2243,8 +2243,13 @@ def test_build_tray_icon_uses_bundled_icon_file(monkeypatch):
             self.menu = menu
 
     fake_pystray = types.SimpleNamespace(Menu=FakeMenu, MenuItem=FakeMenuItem, Icon=FakeIcon)
+    # `Image` set directly on the fake "PIL" package so `from PIL import
+    # Image` resolves via a plain hasattr() check, without the real import
+    # system needing to locate an actual "PIL.Image" submodule.
+    monkeypatch.setitem(
+        windows_launcher.sys.modules, "PIL", types.SimpleNamespace(Image=FakeImage)
+    )
     monkeypatch.setitem(windows_launcher.sys.modules, "pystray", fake_pystray)
-    monkeypatch.setitem(windows_launcher.sys.modules, "PIL.Image", FakeImage)
 
     icon = windows_launcher._build_tray_icon(lambda: None, lambda: None)
 
