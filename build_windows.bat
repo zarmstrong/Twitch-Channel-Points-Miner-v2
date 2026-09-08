@@ -29,7 +29,6 @@ py -m PyInstaller ^
   --icon "assets\twitch-miner.ico" ^
   --collect-all TwitchChannelPointsMiner ^
   --collect-all webview ^
-  --collect-all pystray ^
   --hidden-import PIL.IcoImagePlugin ^
   --hidden-import PIL.PngImagePlugin ^
   --add-data "assets;assets" ^
