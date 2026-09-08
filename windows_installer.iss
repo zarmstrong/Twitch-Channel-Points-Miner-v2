@@ -242,8 +242,7 @@ begin
   begin
     LegacyConfigNoticeShown := True;
     MsgBox(
-      'An existing configuration was found in ' + ExpandConstant('{app}') + '.' +
-      #13#10#13#10 +
+      'An existing configuration was found in ' + ExpandConstant('{app}') + '.' + #13#10#13#10 +
       'It will be moved to ' + ExpandConstant('{localappdata}\TwitchChannelPointsMiner') +
       ' and used automatically the first time the app runs, so the ' +
       '"Configure the miner" step will be skipped.',
