@@ -1114,6 +1114,13 @@ def launch_shell(
         # Reuses the same confirm-then-stop-mining logic the close button
         # used to run directly - it now only runs from the tray's Quit
         # action, since closing the window itself just hides it (see below).
+        #
+        # Must un-hide first: a confirmation dialog owned by a still-hidden
+        # window can render but end up unclickable (no window to properly
+        # own/activate it), leaving no way to answer it short of killing
+        # the process - see _make_hide_to_tray_handler for the hide side of
+        # this.
+        window.show()
         if _make_close_confirmation_handler(window, miner_thread)():
             if tray_icon is not None:
                 tray_icon.stop()

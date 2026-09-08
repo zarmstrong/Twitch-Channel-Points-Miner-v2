@@ -2345,12 +2345,25 @@ def test_launch_shell_quit_from_tray_stops_miner_and_destroys_window(tmp_path, m
     )
 
     window = fake_webview.window
-    window.create_confirmation_dialog = lambda title, message: True
+    dialog_saw_window_hidden = []
+
+    def fake_dialog(title, message):
+        dialog_saw_window_hidden.append(window.hidden)
+        return True
+
+    window.create_confirmation_dialog = fake_dialog
+
+    # Simulates the real sequence: minimized to tray (hidden) first, then
+    # Quit clicked from there - never actually shown again in between.
+    window.hide()
 
     captured["on_quit"]()
 
     assert miner.calls == [(None, None)]
     assert window.destroyed is True
+    # A dialog owned by a still-hidden window can render but be
+    # unclickable - the window must be shown again before it's created.
+    assert dialog_saw_window_hidden == [False]
 
 
 def test_build_tray_icon_uses_bundled_icon_file(monkeypatch):
