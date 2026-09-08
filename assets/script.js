@@ -1245,7 +1245,7 @@ function renderConfiguredStreamers(streamers) {
     if (!configuredStreamersSortable) {
         configuredStreamersSortable = makeSortable(container[0], function () {
             var reordered = $('#configured-streamers .config-streamer').map(function () {
-                return $(this).data('username');
+                return $(this).attr('data-username');
             }).get();
             updateWebConfig({ action: 'reorder_streamers', usernames: reordered }, 'Streamer order was updated.');
         });
@@ -1292,7 +1292,7 @@ function renderConfiguredStreamers(streamers) {
     });
     $('.save-streamer-settings').off('click').on('click', saveStreamerSettings);
     $('.remove-streamer').off('click').on('click', function () {
-        var username = $(this).closest('.config-streamer').data('username');
+        var username = $(this).closest('.config-streamer').attr('data-username');
         if (window.confirm(`Remove ${username} from the miner configuration?`)) {
             updateWebConfig({ action: 'remove', kind: 'streamers', value: username }, `${username} was removed.`);
         }
@@ -1461,7 +1461,7 @@ function saveStreamerSettings() {
         settings[$(this).data('setting')] = $(this).prop('checked');
     });
     settings.chat = item.find('[data-setting="chat"]').val();
-    var username = item.data('username');
+    var username = item.attr('data-username');
     updateWebConfig({ action: 'update_streamer', username: username, settings: settings }, `${username} settings were saved.`, button);
 }
 

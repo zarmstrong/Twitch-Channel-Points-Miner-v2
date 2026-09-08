@@ -512,6 +512,12 @@ body.header-hidden .top-controls-row {
     justify-self: start;
 }
 
+.config-settings-grid .select,
+.config-settings-grid select {
+    min-width: 0;
+    max-width: 100%;
+}
+
 .config-checkbox {
     align-self: center;
     padding: 8px 0;
