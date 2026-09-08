@@ -1268,6 +1268,48 @@ def test_window_api_open_twitch_activate_opens_the_activation_page(monkeypatch):
     assert opened == ["https://www.twitch.tv/activate"]
 
 
+def test_window_api_open_external_url_opens_http_and_https_links(monkeypatch):
+    opened = []
+    monkeypatch.setattr(windows_launcher.webbrowser, "open", lambda url: opened.append(url))
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=None,
+        needs_username=False,
+        start_mining=lambda: None,
+        logs_dir=None,
+    )
+
+    api.open_external_url("https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3")
+    api.open_external_url("http://example.com")
+
+    assert opened == [
+        "https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3",
+        "http://example.com",
+    ]
+
+
+def test_window_api_open_external_url_ignores_non_http_schemes(monkeypatch):
+    opened = []
+    monkeypatch.setattr(windows_launcher.webbrowser, "open", lambda url: opened.append(url))
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(),
+        dashboard_info=None,
+        initial_tab=None,
+        config_path=None,
+        needs_username=False,
+        start_mining=lambda: None,
+        logs_dir=None,
+    )
+
+    api.open_external_url("file:///etc/passwd")
+    api.open_external_url("javascript:alert(1)")
+    api.open_external_url(None)
+
+    assert opened == []
+
+
 def test_window_api_enable_dashboard_delegates_to_shared_helper(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(

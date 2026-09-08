@@ -1,3 +1,22 @@
+// When this page is embedded in the Windows desktop shell's Dashboard tab
+// (an iframe on a different origin than the shell's own synthetic page), a
+// target="_blank" link can't open a normal browser tab the way it does when
+// this page is loaded directly - pywebview just shows a blank native popup
+// window instead. Route those clicks up to the shell (see its `message`
+// listener in windows_shell.html) to open in the user's real browser
+// instead. A real browser tab has `window.self === window.top` and this is
+// a no-op there, so external links keep working exactly as before.
+if (window.self !== window.top) {
+    document.addEventListener('click', function (event) {
+        var link = event.target.closest && event.target.closest('a[target="_blank"]');
+        if (!link) return;
+        var href = link.getAttribute('href') || '';
+        if (href.indexOf('http://') !== 0 && href.indexOf('https://') !== 0) return;
+        event.preventDefault();
+        window.top.postMessage({ type: 'shell-open-external', url: link.href }, '*');
+    });
+}
+
 // ApexCharts uses "MM" for months; the logger date format uses "mm".
 function toApexDateFormat(format) {
     return format.replace(/mm/g, 'MM');

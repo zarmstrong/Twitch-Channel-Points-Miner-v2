@@ -15,6 +15,7 @@ from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     bounded_log_start,
     filter_datas,
     get_streamer_summary,
+    read_dashboard_prefs,
     seek_log_start,
     streamers_available,
 )
@@ -318,6 +319,112 @@ def test_dashboard_hides_banner_for_dismissed_version_but_keeps_footer(monkeypat
 
     assert 'id="update-available-banner"' not in page
     assert "Upgrade available: 3.8.0" in page
+
+
+def test_index_embeds_saved_dashboard_prefs_in_page(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "dashboard_prefs.json").write_text(
+        '{"dark-mode": "false", "annotations": "true"}', encoding="utf-8"
+    )
+    server = AnalyticsServer(password=None)
+
+    page = server.app.test_client().get("/").get_data(as_text=True)
+
+    assert '"dark-mode": "false"' in page
+    assert '"annotations": "true"' in page
+
+
+def test_index_embeds_empty_prefs_when_none_saved_yet(monkeypatch):
+    monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
+    server = AnalyticsServer(password=None)
+
+    page = server.app.test_client().get("/").get_data(as_text=True)
+
+    assert "var serverDashboardPrefs = {}" in page
+
+
+def test_dashboard_prefs_endpoint_persists_a_new_value(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    response = client.post("/dashboard_prefs", json={"key": "dark-mode", "value": "false"})
+
+    assert response.status_code == 200
+    assert response.get_json() == {"dark-mode": "false"}
+    assert read_dashboard_prefs() == {"dark-mode": "false"}
+
+
+def test_dashboard_prefs_endpoint_removes_key_when_value_is_null(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "dashboard_prefs.json").write_text(
+        '{"dark-mode": "false", "annotations": "true"}', encoding="utf-8"
+    )
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    response = client.post("/dashboard_prefs", json={"key": "dark-mode", "value": None})
+
+    assert response.status_code == 200
+    assert response.get_json() == {"annotations": "true"}
+    assert read_dashboard_prefs() == {"annotations": "true"}
+
+
+def test_dashboard_prefs_endpoint_rejects_unknown_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    response = client.post(
+        "/dashboard_prefs", json={"key": "not-a-real-pref", "value": "x"}
+    )
+
+    assert response.status_code == 400
+    assert read_dashboard_prefs() == {}
+
+
+def test_dashboard_prefs_endpoint_rejects_oversized_value(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    response = client.post(
+        "/dashboard_prefs", json={"key": "dark-mode", "value": "x" * 1000}
+    )
+
+    assert response.status_code == 400
+    assert read_dashboard_prefs() == {}
+
+
+def test_dashboard_prefs_endpoint_without_analytics_path_is_a_harmless_noop(
+    monkeypatch,
+):
+    monkeypatch.delattr(Settings, "analytics_path", raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    response = client.post("/dashboard_prefs", json={"key": "dark-mode", "value": "x"})
+
+    assert response.status_code == 200
+
+
+def test_read_dashboard_prefs_ignores_unexpected_keys_and_non_string_values(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "dashboard_prefs.json").write_text(
+        '{"dark-mode": "true", "not-allowed": "x", "annotations": 1}',
+        encoding="utf-8",
+    )
+
+    assert read_dashboard_prefs() == {"dark-mode": "true"}
+
+
+def test_read_dashboard_prefs_defaults_to_empty_without_analytics_path(monkeypatch):
+    monkeypatch.delattr(Settings, "analytics_path", raising=False)
+
+    assert read_dashboard_prefs() == {}
 
 
 def test_authenticated_config_writes_reach_the_endpoint(tmp_path, monkeypatch):

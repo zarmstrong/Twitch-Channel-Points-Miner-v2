@@ -21,14 +21,22 @@
 
     <link id="dark-theme" href="{{url_for('static', filename='dark-theme.css', v=assetVersion)}}" rel="stylesheet" />
     <script>
+        // Server-persisted fallback for dark mode/annotations/etc. when this
+        // page's own localStorage is blocked (see safeStorage below).
+        // Defined before safeStorage so its in-memory fallback can seed
+        // itself synchronously from this - no async round-trip, and so no
+        // flash of default settings before the real ones apply.
+        var serverDashboardPrefs = {{ dashboardPrefs | tojson }};
+
         // Wrapped so a blocked/restricted localStorage (e.g. third-party
         // storage restrictions inside the Windows desktop shell's embedded
         // iframe, whose top-level document is a different origin than this
         // page) can't throw and silently abort every later script on the
-        // page - it falls back to an in-memory stand-in instead, so saved
-        // preferences just don't survive a reload in that one context
-        // rather than breaking the whole dashboard. Defined here, before
-        // script.js, so both can share it.
+        // page - it falls back to a store backed by serverDashboardPrefs
+        // instead, so preferences still survive a reload in that context
+        // (persisted server-side - see /dashboard_prefs - rather than
+        // browser storage) instead of just breaking the whole dashboard.
+        // Defined here, before script.js, so both can share it.
         var safeStorage = (function () {
             try {
                 var testKey = '__tcpm_storage_test__';
@@ -37,15 +45,35 @@
                 return window.localStorage;
             } catch (error) {
                 var memory = {};
+                if (serverDashboardPrefs && typeof serverDashboardPrefs === 'object') {
+                    Object.keys(serverDashboardPrefs).forEach(function (key) {
+                        memory[key] = serverDashboardPrefs[key];
+                    });
+                }
+                function persist(key, value) {
+                    // Best-effort, fire-and-forget - a failed save here just
+                    // means this one change doesn't survive a restart, not
+                    // worth surfacing to the user over.
+                    if (typeof $ === 'undefined') return;
+                    $.ajax({
+                        url: 'dashboard_prefs',
+                        method: 'POST',
+                        contentType: 'application/json',
+                        data: JSON.stringify({ key: key, value: value }),
+                    });
+                }
                 return {
                     getItem: function (key) {
                         return Object.prototype.hasOwnProperty.call(memory, key) ? memory[key] : null;
                     },
                     setItem: function (key, value) {
-                        memory[key] = String(value);
+                        value = String(value);
+                        memory[key] = value;
+                        persist(key, value);
                     },
                     removeItem: function (key) {
                         delete memory[key];
+                        persist(key, null);
                     },
                 };
             }

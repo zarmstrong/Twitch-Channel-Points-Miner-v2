@@ -34,6 +34,29 @@ RESPONSE_CACHE_TTL_SECONDS = 10.0
 SHELL_BYPASS_TOKEN_ENV_VAR = "TCPM_SHELL_ANALYTICS_TOKEN"
 SHELL_BYPASS_COOKIE = "tcpm_shell_token"
 
+# charts.html's own display preferences (dark mode, annotations, header
+# visibility, ...) - normally just localStorage on the browser making the
+# request, which works fine for a real browser tab or the Docker deployment.
+# The Windows desktop shell embeds this same page in an iframe on a
+# different origin than its own synthetic top-level page though, and that
+# cross-origin embedding is exactly the case browsers restrict localStorage
+# in - so charts.html's safeStorage falls back to these server-persisted
+# copies there instead of losing them on every reload. An explicit allowlist
+# (not "whatever key/value the page sends") keeps this file from becoming an
+# arbitrary write target for anything that can reach this endpoint.
+DASHBOARD_PREFS_FILENAME = "dashboard_prefs.json"
+ALLOWED_DASHBOARD_PREF_KEYS = {
+    "dark-mode",
+    "annotations",
+    "headerVisibility",
+    "dropsFilter",
+    "sort-by",
+    "dashboardTab",
+    "selectedStreamer",
+    "selectedDropCategory",
+}
+MAX_DASHBOARD_PREF_VALUE_LENGTH = 256
+
 
 class TTLResponseCache:
     """Thread-safe TTL cache for expensive dashboard JSON responses.
@@ -404,6 +427,35 @@ def now_watching():
     return Response(payload, status=200, mimetype="application/json")
 
 
+def _dashboard_prefs_path():
+    # analytics_path is only ever set once analytics setup actually runs
+    # (TwitchChannelPointsMiner.__init__) - unset here means there's nowhere
+    # sane to read or write, not an error case callers need to handle
+    # separately.
+    analytics_path = getattr(Settings, "analytics_path", None)
+    if not analytics_path:
+        return None
+    return os.path.join(analytics_path, DASHBOARD_PREFS_FILENAME)
+
+
+def read_dashboard_prefs():
+    path = _dashboard_prefs_path()
+    if path is None:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        key: value
+        for key, value in data.items()
+        if key in ALLOWED_DASHBOARD_PREF_KEYS and isinstance(value, str)
+    }
+
+
 def index(refresh=5, days_ago=7, log_poll_interval=5):
     assets_folder = get_assets_folder()
     asset_version = max(
@@ -427,7 +479,61 @@ def index(refresh=5, days_ago=7, log_poll_interval=5):
             latest_version is not None and dismissed_version != latest_version
         ),
         updateDismissalCookie=UPDATE_DISMISSAL_COOKIE,
+        dashboardPrefs=read_dashboard_prefs(),
     )
+
+
+def dashboard_prefs():
+    """Persist one charts.html display preference server-side - the
+    fallback safeStorage in charts.html uses when this page's own
+    localStorage is blocked (see the module-level comment on
+    ALLOWED_DASHBOARD_PREF_KEYS). `value: null` removes the key, matching
+    localStorage.removeItem's contract.
+    """
+    payload = request.get_json(silent=True) or {}
+    key = payload.get("key")
+    value = payload.get("value", "__missing__")
+    if key not in ALLOWED_DASHBOARD_PREF_KEYS or value == "__missing__":
+        return Response(
+            json.dumps({"error": "Unknown preference."}),
+            status=400,
+            mimetype="application/json",
+        )
+    if value is not None and (
+        not isinstance(value, str) or len(value) > MAX_DASHBOARD_PREF_VALUE_LENGTH
+    ):
+        return Response(
+            json.dumps({"error": "Invalid preference value."}),
+            status=400,
+            mimetype="application/json",
+        )
+
+    path = _dashboard_prefs_path()
+    if path is None:
+        # Analytics setup hasn't run yet (no analytics_path to write under) -
+        # nothing to persist to, but not worth failing the request over;
+        # charts.html's in-memory fallback still holds the value for the
+        # rest of this session.
+        return Response(json.dumps({}), status=200, mimetype="application/json")
+
+    with ANALYTICS_FILE_MUTEX:
+        prefs = read_dashboard_prefs()
+        if value is None:
+            prefs.pop(key, None)
+        else:
+            prefs[key] = value
+        try:
+            with open(path, "w", encoding="utf-8") as file:
+                json.dump(prefs, file)
+        except OSError as error:
+            logger.error("Unable to persist dashboard preferences: %s", error)
+            return Response(
+                json.dumps({"error": "Unable to save preference."}),
+                status=500,
+                mimetype="application/json",
+            )
+
+    return Response(json.dumps(prefs), status=200, mimetype="application/json")
 
 
 def streamers():
@@ -803,6 +909,12 @@ class AnalyticsServer(Thread):
             "/config/notifications/<string:provider>/test",
             "test_web_notification",
             test_web_notification,
+            methods=["POST"],
+        )
+        self.app.add_url_rule(
+            "/dashboard_prefs",
+            "dashboard_prefs",
+            dashboard_prefs,
             methods=["POST"],
         )
 

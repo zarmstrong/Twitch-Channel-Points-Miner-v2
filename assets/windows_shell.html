@@ -45,6 +45,34 @@
             flex: 1;
         }
 
+        #shell-tab-dashboard-group {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+        }
+
+        /* Only meaningful while on the Dashboard tab - stays out of the way
+           otherwise, and out of the tab order when it's not clickable. */
+        #shell-dashboard-refresh {
+            display: none;
+            background: transparent;
+            border: none;
+            color: #eee;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 15px;
+            line-height: 1;
+        }
+
+        #shell-dashboard-refresh:hover {
+            background: #2b2d3e;
+        }
+
+        #shell-dashboard-refresh.visible {
+            display: inline-block;
+        }
+
         #shell-open-browser,
         #shell-open-config-folder,
         #shell-open-logs-folder {
@@ -71,6 +99,20 @@
             bottom: 0;
         }
 
+        /* Used instead of display:none to switch tabs - display:none can
+           make the embedded browser engine discard/reload a hidden
+           iframe's page (losing its in-memory state, and any localStorage
+           write that silently fell back to memory-only because this
+           iframe's origin is third-party to the shell's own - see
+           charts.html's safeStorage), which is exactly what made the
+           dashboard's dark mode/annotations checkboxes appear to forget
+           themselves when switching away and back. Staying in the layout
+           with visibility:hidden keeps the iframe alive throughout. */
+        .shell-panel.shell-panel-hidden {
+            visibility: hidden;
+            pointer-events: none;
+        }
+
         #dashboard-panel iframe {
             width: 100%;
             height: 100%;
@@ -79,10 +121,35 @@
         }
 
         #console-panel {
-            display: none;
+            display: flex;
+            flex-direction: column;
+            box-sizing: border-box;
+        }
+
+        #console-toolbar {
+            flex: 0 0 auto;
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 5px;
+            padding: 6px 10px;
+            color: #9aa0c0;
+            font-size: 12px;
+            border-bottom: 1px solid #2b2d3e;
+        }
+
+        #console-toolbar label {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+        }
+
+        #console-scroll {
+            flex: 1 1 auto;
+            overflow: auto;
             padding: 10px;
             box-sizing: border-box;
-            overflow: auto;
         }
 
         #console-content {
@@ -297,7 +364,11 @@
     </div>
 
     <div id="shell-tabs">
-        <button id="shell-tab-dashboard" class="active" type="button">Dashboard</button>
+        <span id="shell-tab-dashboard-group">
+            <button id="shell-tab-dashboard" class="active" type="button">Dashboard</button>
+            <button id="shell-dashboard-refresh" class="visible" type="button" title="Refresh dashboard"
+                aria-label="Refresh dashboard">&#8635;</button>
+        </span>
         <button id="shell-tab-console" type="button">Console</button>
         <span class="spacer"></span>
         <label id="shell-autostart-label" hidden>
@@ -326,8 +397,15 @@
         <iframe id="dashboard-frame" style="display: none;"></iframe>
     </div>
 
-    <div id="console-panel" class="shell-panel">
-        <pre id="console-content"></pre>
+    <div id="console-panel" class="shell-panel shell-panel-hidden">
+        <div id="console-toolbar">
+            <label>
+                <input type="checkbox" id="shell-autoscroll-checkbox" checked> Auto-scroll
+            </label>
+        </div>
+        <div id="console-scroll">
+            <pre id="console-content"></pre>
+        </div>
     </div>
 
     <script>
@@ -336,20 +414,64 @@
 
         function switchShellTab(tab) {
             var isDashboard = tab === 'dashboard';
-            document.getElementById('dashboard-panel').style.display = isDashboard ? 'block' : 'none';
-            document.getElementById('console-panel').style.display = isDashboard ? 'none' : 'block';
+            document.getElementById('dashboard-panel').classList.toggle('shell-panel-hidden', !isDashboard);
+            document.getElementById('console-panel').classList.toggle('shell-panel-hidden', isDashboard);
             document.getElementById('shell-tab-dashboard').classList.toggle('active', isDashboard);
             document.getElementById('shell-tab-console').classList.toggle('active', !isDashboard);
+            document.getElementById('shell-dashboard-refresh').classList.toggle('visible', isDashboard);
+        }
+
+        // Re-runs the same fetch loadDashboard() does on first launch - the
+        // only way to recover from a blank/broken dashboard (a JS error in
+        // the embedded page, a stale iframe after the analytics server was
+        // restarted, ...) without restarting the whole app. Clearing the
+        // iframe's src to about:blank first (rather than just re-assigning
+        // the same URL, which some engines treat as a no-op) forces a real
+        // reload.
+        function refreshDashboard() {
+            document.getElementById('analytics-disabled-panel').style.display = 'none';
+            document.getElementById('dashboard-message').style.display = 'none';
+            var frame = document.getElementById('dashboard-frame');
+            frame.style.display = 'none';
+            frame.src = 'about:blank';
+            dashboardRequested = false;
+            loadDashboard();
         }
 
         document.getElementById('shell-tab-dashboard').addEventListener('click', function () {
+            // Clicking Dashboard while already on it has nothing else to do -
+            // treat it as a refresh request instead of a no-op, so there's
+            // always a way to recover a blank/stuck dashboard from the tab
+            // itself, not just the small refresh icon next to it.
+            var alreadyActive = document.getElementById('shell-tab-dashboard').classList.contains('active');
             switchShellTab('dashboard');
+            if (alreadyActive) refreshDashboard();
         });
         document.getElementById('shell-tab-console').addEventListener('click', function () {
             switchShellTab('console');
         });
+        document.getElementById('shell-dashboard-refresh').addEventListener('click', function (event) {
+            event.stopPropagation();
+            refreshDashboard();
+        });
         document.getElementById('shell-open-browser').addEventListener('click', function () {
             if (window.pywebview) window.pywebview.api.open_in_browser();
+        });
+
+        // The dashboard iframe runs on a different origin than the shell's
+        // own synthetic page, so a target="_blank" link inside it can't pop
+        // a normal new tab the way it would in a real browser - pywebview
+        // just shows a blank native window instead. The dashboard's own JS
+        // (script.js) intercepts those clicks when embedded and posts the
+        // URL up here instead; `event.source` is checked so only the actual
+        // dashboard iframe (not some other/future embedded content) can
+        // trigger opening a browser window.
+        window.addEventListener('message', function (event) {
+            var frame = document.getElementById('dashboard-frame');
+            if (event.source !== frame.contentWindow) return;
+            if (event.data && event.data.type === 'shell-open-external' && window.pywebview) {
+                window.pywebview.api.open_external_url(event.data.url);
+            }
         });
         document.getElementById('shell-open-config-folder').addEventListener('click', function () {
             if (window.pywebview) window.pywebview.api.open_config_folder();
@@ -467,6 +589,21 @@
             }
         });
 
+        var autoscrollCheckbox = document.getElementById('shell-autoscroll-checkbox');
+        try {
+            var savedAutoscroll = window.localStorage.getItem('shell-console-autoscroll');
+            if (savedAutoscroll !== null) autoscrollCheckbox.checked = savedAutoscroll === 'true';
+        } catch (error) {
+            // Falls back to the checkbox's default (checked) for this run.
+        }
+        autoscrollCheckbox.addEventListener('change', function () {
+            try {
+                window.localStorage.setItem('shell-console-autoscroll', autoscrollCheckbox.checked);
+            } catch (error) {
+                // Preference just won't survive a restart - not worth surfacing.
+            }
+        });
+
         function pollConsole() {
             if (!window.pywebview) {
                 setTimeout(pollConsole, 300);
@@ -480,7 +617,10 @@
                     result.lines.forEach(function (line) {
                         content.appendChild(document.createTextNode(line));
                     });
-                    content.scrollTop = content.scrollHeight;
+                    if (autoscrollCheckbox.checked) {
+                        var scrollContainer = document.getElementById('console-scroll');
+                        scrollContainer.scrollTop = scrollContainer.scrollHeight;
+                    }
                     lastConsoleSeq = result.next_seq;
                     scanConsoleForTwitchLogin(result.lines.join(''));
                 }

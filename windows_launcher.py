@@ -777,6 +777,26 @@ class WindowApi:
     def open_twitch_activate(self):
         webbrowser.open("https://www.twitch.tv/activate")
 
+    def open_external_url(self, url):
+        """Open an arbitrary http(s) link from the embedded dashboard iframe
+        in the user's real default browser.
+
+        The dashboard runs inside a same-origin-with-itself but
+        cross-origin-with-the-shell iframe, so a plain `target="_blank"`
+        link there tries to open a new pywebview-native popup window
+        instead of a normal browser tab - which has no default browser
+        association and just shows blank. The dashboard's own JS posts
+        these clicks up to the shell (see windows_shell.html's `message`
+        listener), which calls this instead.
+
+        Restricted to http(s) so this can't be used to launch arbitrary
+        local files or other URI schemes - not a strong security boundary
+        (the dashboard content is our own template, not attacker-supplied),
+        just a sensible guard against a malformed or unexpected URL.
+        """
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            webbrowser.open(url)
+
     def enable_dashboard(self):
         success, message = _enable_dashboard_from_shell(self._config_path)
         return {"success": success, "message": message}
