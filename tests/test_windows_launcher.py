@@ -2215,22 +2215,48 @@ def test_hide_to_tray_handler_hides_window_and_cancels_the_close():
             self.hidden = True
 
     window = FakeWindow()
-    handler = windows_launcher._make_hide_to_tray_handler(window)
+    tray_icon = _FakeTrayIcon()
+    handler = windows_launcher._make_hide_to_tray_handler(window, tray_icon)
 
     assert handler() is False
     assert window.hidden is True
+    assert tray_icon.notifications == [
+        (
+            "Still running and mining in the background. "
+            "Use the tray icon's Quit to stop it.",
+            "Twitch Channel Points Miner",
+        )
+    ]
+
+
+def test_hide_to_tray_handler_survives_a_notify_failure():
+    class FakeWindow:
+        def hide(self):
+            pass
+
+    class BrokenTrayIcon:
+        def notify(self, message, title=None):
+            raise RuntimeError("notifications unsupported on this backend")
+
+    handler = windows_launcher._make_hide_to_tray_handler(FakeWindow(), BrokenTrayIcon())
+
+    assert handler() is False
 
 
 class _FakeTrayIcon:
     def __init__(self):
         self.ran = False
         self.stopped = False
+        self.notifications = []
 
     def run(self):
         self.ran = True
 
     def stop(self):
         self.stopped = True
+
+    def notify(self, message, title=None):
+        self.notifications.append((message, title))
 
 
 def test_launch_shell_falls_back_to_close_confirmation_when_tray_unavailable(
@@ -2366,6 +2392,159 @@ def test_build_tray_icon_uses_bundled_icon_file(monkeypatch):
     assert icon.image == "the-image"
     assert str(opened["path"]).endswith(windows_launcher._TRAY_ICON_FILE)
     assert [item.text for item in icon.menu.items] == ["Show", "Quit"]
+
+
+# --- Single instance --------------------------------------------------
+
+
+def test_acquire_single_instance_lock_true_on_non_windows(monkeypatch):
+    monkeypatch.setattr(windows_launcher.os, "name", "posix")
+    # Accessing .windll at all would be a bug here - see the matching
+    # comment on test_show_fatal_error_message_noop_on_other_platforms.
+    monkeypatch.delattr(windows_launcher.ctypes, "windll", raising=False)
+
+    assert windows_launcher._acquire_single_instance_lock() is True
+
+
+def test_acquire_single_instance_lock_true_for_the_first_instance(monkeypatch):
+    class FakeKernel32:
+        def SetLastError(self, code):
+            pass
+
+        def CreateMutexW(self, security, initial_owner, name):
+            self.requested_name = name
+            return 1  # Any truthy handle.
+
+        def GetLastError(self):
+            return 0
+
+    class FakeWindll:
+        kernel32 = FakeKernel32()
+
+    fake_windll = FakeWindll()
+    monkeypatch.setattr(windows_launcher.os, "name", "nt")
+    monkeypatch.setattr(windows_launcher.ctypes, "windll", fake_windll, raising=False)
+
+    assert windows_launcher._acquire_single_instance_lock() is True
+    assert (
+        fake_windll.kernel32.requested_name
+        == windows_launcher._SINGLE_INSTANCE_MUTEX_NAME
+    )
+
+
+def test_acquire_single_instance_lock_false_when_already_running(monkeypatch):
+    class FakeKernel32:
+        def SetLastError(self, code):
+            pass
+
+        def CreateMutexW(self, security, initial_owner, name):
+            return 1
+
+        def GetLastError(self):
+            return 183  # ERROR_ALREADY_EXISTS
+
+    class FakeWindll:
+        kernel32 = FakeKernel32()
+
+    monkeypatch.setattr(windows_launcher.os, "name", "nt")
+    monkeypatch.setattr(windows_launcher.ctypes, "windll", FakeWindll(), raising=False)
+
+    assert windows_launcher._acquire_single_instance_lock() is False
+
+
+def test_acquire_single_instance_lock_fails_open_on_error(monkeypatch):
+    class ExplodingWindll:
+        @property
+        def kernel32(self):
+            raise RuntimeError("no such API")
+
+    monkeypatch.setattr(windows_launcher.os, "name", "nt")
+    monkeypatch.setattr(windows_launcher.ctypes, "windll", ExplodingWindll(), raising=False)
+
+    # Never block launch just because the check itself broke.
+    assert windows_launcher._acquire_single_instance_lock() is True
+
+
+def _free_loopback_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_single_instance_listener_shows_window_when_pinged(monkeypatch):
+    # Uses a real, dynamically-probed port (not the module's fixed
+    # constant) so this can't collide with anything else already using
+    # that port on the machine running the test.
+    monkeypatch.setattr(
+        windows_launcher, "_SINGLE_INSTANCE_PORT", _free_loopback_port()
+    )
+
+    class FakeWindow:
+        def __init__(self):
+            self.shown = threading.Event()
+
+        def show(self):
+            self.shown.set()
+
+    window = FakeWindow()
+    windows_launcher._start_single_instance_listener(window)
+
+    windows_launcher._notify_running_instance()
+
+    assert window.shown.wait(timeout=2) is True
+
+
+def test_notify_running_instance_is_silent_with_nothing_listening(monkeypatch):
+    monkeypatch.setattr(
+        windows_launcher, "_SINGLE_INSTANCE_PORT", _free_loopback_port()
+    )
+
+    windows_launcher._notify_running_instance()  # must not raise
+
+
+def test_main_shows_message_and_pings_existing_instance_when_already_running(
+    monkeypatch,
+):
+    monkeypatch.setattr(windows_launcher, "_acquire_single_instance_lock", lambda: False)
+    notified = []
+    shown = []
+    monkeypatch.setattr(
+        windows_launcher, "_notify_running_instance", lambda: notified.append(True)
+    )
+    monkeypatch.setattr(
+        windows_launcher, "_message_box", lambda text, title, flags: shown.append(text)
+    )
+
+    result = windows_launcher.main()
+
+    assert result == 0
+    assert notified == [True]
+    assert len(shown) == 1
+
+
+def test_main_convert_only_is_exempt_from_the_single_instance_check(
+    tmp_path, monkeypatch
+):
+    # A scripted `--convert-only` invocation must run even while the
+    # desktop app is already open - it's not "a second launch of the app".
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
+    monkeypatch.setattr(
+        windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe", "--convert-only"]
+    )
+    monkeypatch.setattr(windows_launcher, "_acquire_single_instance_lock", lambda: False)
+    monkeypatch.setattr(
+        windows_launcher,
+        "_notify_running_instance",
+        lambda: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    assert windows_launcher.main() == 0
 
 
 # --- Start on Windows login -----------------------------------------------

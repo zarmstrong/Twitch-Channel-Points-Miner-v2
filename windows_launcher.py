@@ -7,6 +7,7 @@ import ctypes  # cross-platform stdlib module; only .windll is Windows-only (gua
 import os
 import secrets
 import shutil
+import socket
 import sys
 import threading
 import time
@@ -69,6 +70,15 @@ _TRAY_ICON_FILE = "twitch-miner.ico"
 _AUTOSTART_VALUE_NAME = "TwitchChannelPointsMiner"
 _AUTOSTART_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _START_MINIMIZED_FLAG = "--start-minimized"
+# Session-local (not "Global\\") - matches the rest of this launcher's
+# per-user assumptions (e.g. the autostart registry key lives under HKCU),
+# and avoids needing any elevated privilege to create.
+_SINGLE_INSTANCE_MUTEX_NAME = "Local\\TwitchChannelPointsMinerSingleInstance"
+# Loopback-only "please show yourself" signal for a second launch to send
+# the first. Distinct from the analytics dashboard's own (configurable,
+# default 54455) port.
+_SINGLE_INSTANCE_HOST = "127.0.0.1"
+_SINGLE_INSTANCE_PORT = 54876
 
 
 def application_directory():
@@ -620,6 +630,85 @@ def _dashboard_url_with_bypass(url):
     return f"{url}{separator}shell_token={token}"
 
 
+def _acquire_single_instance_lock():
+    """True if this process is the only running instance.
+
+    Backed by a named kernel mutex rather than anything file- or
+    port-based: creation is atomic, so two processes racing to start at
+    the same moment (e.g. a login-triggered autostart alongside a manual
+    double-click) can never both see "I'm first". The handle is
+    deliberately never closed - Windows releases it automatically when
+    this process exits, and holding it open for the process lifetime is
+    exactly the intended "is the app still running" signal.
+
+    Always True on non-Windows (nothing here is meaningful without the
+    Windows-only ctypes.windll), so this stays a no-op for tests/dev.
+    """
+    if os.name != "nt":
+        return True
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetLastError(0)
+        handle = kernel32.CreateMutexW(None, False, _SINGLE_INSTANCE_MUTEX_NAME)
+        if not handle:
+            return True  # Couldn't even create it - fail open, don't block launch.
+        ERROR_ALREADY_EXISTS = 183
+        return kernel32.GetLastError() != ERROR_ALREADY_EXISTS
+    except Exception:
+        return True
+
+
+def _notify_running_instance():
+    """Best-effort: ask the already-running instance (see
+    _start_single_instance_listener) to bring itself to the foreground.
+
+    Silently gives up on any failure - e.g. an older already-running build
+    without this listener, or the port being unexpectedly taken by
+    something else. Either way the user still gets the "already running"
+    message box from main(); this is a nicety on top of that, not the
+    only feedback they get.
+    """
+    try:
+        with socket.create_connection(
+            (_SINGLE_INSTANCE_HOST, _SINGLE_INSTANCE_PORT), timeout=1
+        ):
+            pass
+    except OSError:
+        pass
+
+
+def _start_single_instance_listener(window):
+    """Runs for the app's lifetime: any connection on this loopback port
+    means a second launch wants us to come to the foreground (see
+    _notify_running_instance, the client side of this).
+
+    A closed connection carries no payload - just connecting is the whole
+    signal - so there's nothing to parse and nothing a local unprivileged
+    process could send to make this do anything other than show the
+    window it could already show itself via the tray.
+    """
+
+    def _serve():
+        try:
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind((_SINGLE_INSTANCE_HOST, _SINGLE_INSTANCE_PORT))
+            server.listen(1)
+        except OSError:
+            return  # Port unavailable - not fatal, just no remote-show support.
+        while True:
+            try:
+                conn, _address = server.accept()
+            except OSError:
+                return
+            conn.close()
+            window.show()
+
+    threading.Thread(
+        target=_serve, name="Single instance listener", daemon=True
+    ).start()
+
+
 def _build_tray_icon(on_show, on_quit):
     """Build a (not-yet-running) system tray icon with Show/Quit actions.
 
@@ -641,16 +730,31 @@ def _build_tray_icon(on_show, on_quit):
     return pystray.Icon("TwitchChannelPointsMiner", image, "Twitch Channel Points Miner", menu)
 
 
-def _make_hide_to_tray_handler(window):
+def _make_hide_to_tray_handler(window, tray_icon):
     """Build a `window.events.closing` handler that hides the window to the
     tray instead of closing it - mining is unaffected, so unlike the older
     confirm-on-close handler this never needs to ask anything. Quitting for
     real now only ever happens via the tray icon's own Quit action (see
     launch_shell), which is where that confirmation moved to.
+
+    Fires a tray balloon/toast notification each time, since hiding the
+    window gives no other feedback that the app is still running rather
+    than having just closed - easy to mistake for a quit, especially the
+    first time. Best-effort: pystray's HAS_NOTIFICATION is False on some
+    platforms/backends, and a notification failing is never worth blocking
+    the hide itself over.
     """
 
     def on_closing():
         window.hide()
+        try:
+            tray_icon.notify(
+                "Still running and mining in the background. "
+                "Use the tray icon's Quit to stop it.",
+                "Twitch Channel Points Miner",
+            )
+        except Exception:
+            pass
         return False
 
     return on_closing
@@ -1002,6 +1106,7 @@ def launch_shell(
         # to collect a username (see main()'s start_minimized gating).
         hidden=start_minimized,
     )
+    _start_single_instance_listener(window)
 
     tray_icon = None
 
@@ -1024,7 +1129,7 @@ def launch_shell(
 
     if tray_icon is not None:
         threading.Thread(target=tray_icon.run, name="Tray icon", daemon=True).start()
-        window.events.closing += _make_hide_to_tray_handler(window)
+        window.events.closing += _make_hide_to_tray_handler(window, tray_icon)
     else:
         window.events.closing += _make_close_confirmation_handler(window, miner_thread)
 
@@ -1072,6 +1177,22 @@ def self_test():
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
+
+    # A scripted/automation invocation (e.g. `--convert-only`) never opens a
+    # window and does its work and exits - it's fine, and expected (e.g.
+    # from an installer step or a script), for that to run alongside an
+    # already-running desktop instance, so it's exempted from this check
+    # entirely rather than treated as a second launch of the app itself.
+    if "--convert-only" not in sys.argv[1:] and not _acquire_single_instance_lock():
+        _notify_running_instance()
+        _message_box(
+            "Twitch Channel Points Miner is already running.\n\n"
+            "Bringing the existing window to the foreground - check your "
+            "taskbar or system tray if it doesn't appear.",
+            "Twitch Channel Points Miner",
+            0x40,  # MB_ICONINFORMATION
+        )
+        return 0
 
     exe_dir = application_directory()
     application_dir = config_root_directory(exe_dir)
