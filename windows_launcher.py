@@ -613,8 +613,10 @@ def _build_tray_icon(on_show, on_quit):
     on this desktop) is the caller's signal to fall back to the older
     confirm-on-close behavior rather than leave the app unclosable.
     """
-    import pystray
-    from PIL import Image
+    import importlib
+
+    pystray = importlib.import_module("pystray")
+    Image = importlib.import_module("PIL.Image")
 
     image = Image.open(bundled_file(os.path.join("assets", _TRAY_ICON_FILE)))
     menu = pystray.Menu(
