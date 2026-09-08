@@ -305,6 +305,18 @@ $(document).ready(function () {
     $('#analytics-delete-modal').click(function (event) {
         if (event.target === this) closeAnalyticsDeleteModal();
     });
+    $('#confirm-modal-cancel').click(closeConfirmDialog);
+    $('#confirm-modal-confirm').click(function () {
+        var callback = confirmDialogCallback;
+        closeConfirmDialog();
+        if (callback) callback();
+    });
+    $('#confirm-modal').click(function (event) {
+        if (event.target === this) closeConfirmDialog();
+    });
+    $(document).on('keydown', function (event) {
+        if (event.key === 'Escape' && $('#confirm-modal').hasClass('is-active')) closeConfirmDialog();
+    });
     $('#add-streamer-form').submit(function (event) {
         event.preventDefault();
         addWebConfigValue('streamers', $('#new-streamer'));
@@ -596,6 +608,26 @@ function updateStreamerDeleteControls() {
             : 'Select streamer analytics data to delete');
     $('#cancel-streamer-analytics-selection').toggle(streamerDeleteSelectionMode);
     $('#streamer-selection-hint').toggle(streamerDeleteSelectionMode);
+}
+
+// Generic in-page replacement for window.confirm(), used for destructive
+// dashboard actions (e.g. removing a streamer/category). Browsers can block
+// or auto-dismiss repeated native confirm() popups, which silently breaks
+// these actions, so this renders an actual dialog in the page instead.
+var confirmDialogCallback = null;
+
+function showConfirmDialog(options) {
+    confirmDialogCallback = options.onConfirm;
+    $('#confirm-modal-title').text(options.title);
+    $('#confirm-modal-message').text(options.message);
+    $('#confirm-modal-confirm').text(options.confirmLabel || 'Remove');
+    $('#confirm-modal').addClass('is-active').attr('aria-hidden', 'false');
+    $('#confirm-modal-cancel').focus();
+}
+
+function closeConfirmDialog() {
+    confirmDialogCallback = null;
+    $('#confirm-modal').removeClass('is-active').attr('aria-hidden', 'true');
 }
 
 function closeAnalyticsDeleteModal() {
@@ -1293,9 +1325,14 @@ function renderConfiguredStreamers(streamers) {
     $('.save-streamer-settings').off('click').on('click', saveStreamerSettings);
     $('.remove-streamer').off('click').on('click', function () {
         var username = $(this).closest('.config-streamer').attr('data-username');
-        if (window.confirm(`Remove ${username} from the miner configuration?`)) {
-            updateWebConfig({ action: 'remove', kind: 'streamers', value: username }, `${username} was removed.`);
-        }
+        showConfirmDialog({
+            title: 'Remove streamer?',
+            message: `Remove ${username} from the miner configuration?`,
+            confirmLabel: 'Remove',
+            onConfirm: function () {
+                updateWebConfig({ action: 'remove', kind: 'streamers', value: username }, `${username} was removed.`);
+            }
+        });
     });
     // Prevent a plain click (no drag) on the handle from toggling the
     // enclosing <details> row open/closed via its <summary> ancestor.
@@ -1329,9 +1366,14 @@ function renderConfiguredCategories(categories) {
     });
     $('.remove-category').off('click').on('click', function () {
         var category = $(this).closest('.config-category').find('.config-item-name').text();
-        if (window.confirm(`Remove ${category} from the miner configuration?`)) {
-            updateWebConfig({ action: 'remove', kind: 'categories', value: category }, `${category} was removed.`);
-        }
+        showConfirmDialog({
+            title: 'Remove category?',
+            message: `Remove ${category} from the miner configuration?`,
+            confirmLabel: 'Remove',
+            onConfirm: function () {
+                updateWebConfig({ action: 'remove', kind: 'categories', value: category }, `${category} was removed.`);
+            }
+        });
     });
 }
 
