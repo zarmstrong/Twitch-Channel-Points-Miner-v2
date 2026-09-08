@@ -157,7 +157,11 @@ def get_assets_folder():
 
 def streamers_available():
     path = Settings.analytics_path
-    excluded_files = {"drops_by_category.json", "now_watching.json"}
+    excluded_files = {
+        "drops_by_category.json",
+        "now_watching.json",
+        DASHBOARD_PREFS_FILENAME,
+    }
     available = [
         f
         for f in os.listdir(path)

@@ -113,6 +113,7 @@ def test_streamers_available_excludes_now_watching_file(monkeypatch, tmp_path):
     (tmp_path / "drops_by_category.json").write_text(
         '{"drops": []}', encoding="utf-8"
     )
+    (tmp_path / "dashboard_prefs.json").write_text("{}", encoding="utf-8")
 
     assert streamers_available() == ["example.json"]
 

@@ -612,6 +612,27 @@ body.header-hidden .top-controls-row {
     box-sizing: border-box;
 }
 
+/* The native calendar-picker icon inside #startDate/#endDate is sized and
+   placed by the rendering engine's own internals, not by this CSS - in the
+   Windows desktop shell's embedded WebView2 (a different Chromium build
+   than a regular browser) it renders slightly outside the input's border
+   instead of centered within it. Pinning it to an absolute position inside
+   the (now explicitly positioned) input, rather than trusting native flow,
+   keeps it inside the box regardless of that host's own icon sizing. */
+input[type="date"].input {
+    position: relative;
+    box-sizing: border-box;
+    padding-right: 2em;
+}
+
+input[type="date"].input::-webkit-calendar-picker-indicator {
+    position: absolute;
+    right: 0.6em;
+    top: 50%;
+    transform: translateY(-50%);
+    margin: 0;
+}
+
 .notification-config summary .tag {
     margin-left: auto;
 }
