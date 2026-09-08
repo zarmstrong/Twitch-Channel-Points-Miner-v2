@@ -512,10 +512,20 @@ body.header-hidden .top-controls-row {
     justify-self: start;
 }
 
+/* Chromium doesn't propagate the inherited box-sizing: border-box down to
+   the non-<summary> content of an open <details> (it's wrapped in an
+   internal box of its own), so form controls in here fall back to
+   content-box and overflow their grid cell once width: 100% is added on
+   top of their padding/border. Set it explicitly instead of inheriting. */
+.config-item * {
+    box-sizing: border-box;
+}
+
 .config-settings-grid .select,
 .config-settings-grid select {
     min-width: 0;
     max-width: 100%;
+    width: 100%;
 }
 
 .config-checkbox {

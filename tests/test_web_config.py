@@ -488,6 +488,32 @@ def test_invalid_category_error_uses_supported_value_terminology(tmp_path):
         )
 
 
+def test_remove_streamer_with_name_manual_config_would_reject_on_add(tmp_path):
+    # STREAMERS entered directly in config.py aren't required to satisfy the
+    # add-time username format (e.g. a hyphenated or over-length name). Remove
+    # must still work for such an entry instead of re-validating its format.
+    config = tmp_path / "config.py"
+    write_config(config)
+    update_managed_web_config(
+        config,
+        {"action": "add", "kind": "streamers", "value": "legacy_placeholder"},
+    )
+    source = config.read_text(encoding="utf-8")
+    config.write_text(
+        source.replace("legacy_placeholder", "legacy-name-with-hyphen"),
+        encoding="utf-8",
+    )
+
+    result = update_managed_web_config(
+        config,
+        {"action": "remove", "kind": "streamers", "value": "legacy-name-with-hyphen"},
+    )
+
+    assert "legacy-name-with-hyphen" not in [
+        streamer["username"] for streamer in result["streamers"]
+    ]
+
+
 @pytest.mark.parametrize("kind", ["streamers", "categories"])
 @pytest.mark.parametrize("action", ["add", "remove"])
 @pytest.mark.parametrize("value", [None, 123, True, [], {}])

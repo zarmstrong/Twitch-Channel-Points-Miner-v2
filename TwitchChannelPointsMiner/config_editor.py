@@ -968,13 +968,16 @@ def _update_managed_web_config(config_path, payload):
         kind = payload.get("kind")
         raw_value = payload.get("value")
         value = raw_value.strip() if isinstance(raw_value, str) else ""
-        valid = (
-            STREAMER_RE.fullmatch(value) is not None
-            if kind == "streamers"
-            else _valid_managed_category(value)
-            if kind == "categories"
-            else False
-        )
+        if action == "add":
+            valid = (
+                STREAMER_RE.fullmatch(value) is not None
+                if kind == "streamers"
+                else _valid_managed_category(value)
+                if kind == "categories"
+                else False
+            )
+        else:
+            valid = bool(value) and kind in {"streamers", "categories"}
         if not valid:
             raise ConfigEditError("Invalid streamer username or category value.")
         items = list(current[kind])
