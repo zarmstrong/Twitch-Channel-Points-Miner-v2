@@ -227,6 +227,43 @@ def test_migrate_legacy_windows_data_resumes_after_a_partial_failure(tmp_path):
     assert not (exe_dir / "cookies").exists()
 
 
+def test_migrate_legacy_windows_data_overwrites_a_stale_bootstrap_template(tmp_path):
+    # Reproduces a real report: the user ran the "standard" build once
+    # before their legacy portable folder was discovered, so prepare_config
+    # already created a blank template at the standard location. Once their
+    # real config/cookies/analytics show up beside the exe and migration
+    # runs, it must not mistake that pre-existing blank template for "this
+    # item was already migrated" and silently leave it in place.
+    exe_dir = tmp_path / "exe"
+    exe_dir.mkdir()
+    standard_dir = tmp_path / "AppData"
+    (standard_dir / "config").mkdir(parents=True)
+    (standard_dir / "config" / "config.py").write_text(
+        "MINER_CONFIG = {'username': 'your-twitch-username'}\n", encoding="utf-8"
+    )
+    _write_legacy_data(exe_dir)
+    (exe_dir / "config" / "config.py").write_text(
+        "MINER_CONFIG = {'username': 'the_real_user'}\n", encoding="utf-8"
+    )
+
+    result = windows_launcher._migrate_legacy_windows_data(exe_dir, standard_dir)
+
+    assert result is not None
+    assert (
+        "the_real_user"
+        in (standard_dir / "config" / "config.py").read_text(encoding="utf-8")
+    )
+    assert (standard_dir / "cookies" / "someone.json").is_file()
+    assert (standard_dir / "analytics" / "someone.json").is_file()
+    # The user's real config was archived too, not just moved aside and lost.
+    assert (
+        "the_real_user"
+        in (exe_dir / "config-legacy" / "config" / "config.py").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
 def test_show_migration_notice_uses_native_message_box_on_windows(monkeypatch):
     calls = []
 

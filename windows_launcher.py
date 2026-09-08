@@ -210,8 +210,23 @@ def _migrate_legacy_windows_data(exe_dir, standard_dir):
     even though cookies/analytics/logs are still stranded there - so this
     also treats a config-legacy folder that exists without a .migrated
     marker as an interrupted migration to resume, regardless of what's left
-    at the old path. The per-item moves/copies below are all guarded by
-    existence checks, so resuming is safe even if some items already moved.
+    at the old path.
+
+    Whether the copy-forward step for a given item has already run is
+    tracked with its own marker inside legacy_root (config-legacy/.<name>
+    -copied), not by checking whether `destination` exists: prepare_config()
+    can create <standard_dir>/config/config.py on an earlier, ordinary
+    launch that happens to run before this legacy data was ever discovered
+    (e.g. the user installed the "standard" build and ran it once before
+    copying their old portable folder's contents alongside the exe) -
+    "destination already exists" is then true for a reason that has nothing
+    to do with this migration ever having copied anything, and skipping the
+    copy on that basis would silently strand the user's real config behind
+    a bootstrap template that looks, from here, indistinguishable from a
+    completed migration. The copy itself uses dirs_exist_ok=True so it
+    still succeeds (overwriting any such stale content with the real
+    archived data) regardless of what, if anything, already sits at
+    `destination`.
 
     Returns None if there was nothing to do, or a message describing what
     happened (success or partial failure) for a one-time notice to the user.
@@ -239,8 +254,10 @@ def _migrate_legacy_windows_data(exe_dir, standard_dir):
                 shutil.move(str(source), str(archived))
             if name in _LEGACY_DIRS_CARRY_FORWARD:
                 destination = standard_dir / name
-                if archived.is_dir() and not destination.exists():
-                    shutil.copytree(archived, destination)
+                copied_marker = legacy_root / f".{name}-copied"
+                if archived.is_dir() and not copied_marker.is_file():
+                    shutil.copytree(archived, destination, dirs_exist_ok=True)
+                    copied_marker.touch()
         (legacy_root / ".migrated").touch()
     except OSError as error:
         return (
