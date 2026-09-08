@@ -30,7 +30,8 @@ py -m PyInstaller ^
   --collect-all TwitchChannelPointsMiner ^
   --collect-all webview ^
   --collect-all pystray ^
-  --collect-all PIL ^
+  --hidden-import PIL.IcoImagePlugin ^
+  --hidden-import PIL.PngImagePlugin ^
   --add-data "assets;assets" ^
   --add-data "config.example.py;." ^
   --add-data "install_mode.txt;." ^
