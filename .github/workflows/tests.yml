@@ -52,6 +52,7 @@ jobs:
   build_windows_exe:
     name: Build Windows executable (${{ matrix.flavor }})
     runs-on: windows-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -60,6 +61,17 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
+
+      # A freshly-built, unsigned PyInstaller onefile exe is exactly what
+      # Windows Defender's real-time/cloud scanning is most suspicious of -
+      # on this runner that can stall running the exe (not building it) for
+      # many minutes rather than the few seconds it takes normally. Excluding
+      # the checkout (where both the build and the smoke-test run) sidesteps
+      # that without weakening anything - this exclusion only exists for the
+      # lifetime of this ephemeral runner.
+      - name: Exclude workspace from Windows Defender scanning
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}"
 
       - name: Set up Python
         uses: actions/setup-python@v6
