@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     AnalyticsServer,
+    BUILD_COMMIT_ENV_VAR,
     MAX_LOG_TAIL_BYTES,
     SHELL_BYPASS_COOKIE,
     SHELL_BYPASS_TOKEN_ENV_VAR,
@@ -306,6 +307,26 @@ def test_dashboard_shows_version_update_banner_and_footer(monkeypatch):
     assert "Running version" in page
     assert "Upgrade available: 3.8.0" in page
     assert "Tkd-Alex" in page
+
+
+def test_dashboard_footer_shows_build_commit_when_set(monkeypatch):
+    monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
+    monkeypatch.setenv(BUILD_COMMIT_ENV_VAR, "abc1234")
+    server = AnalyticsServer(password=None)
+
+    page = server.app.test_client().get("/").get_data(as_text=True)
+
+    assert "(abc1234)" in page
+
+
+def test_dashboard_footer_omits_build_commit_when_unset(monkeypatch):
+    monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
+    monkeypatch.delenv(BUILD_COMMIT_ENV_VAR, raising=False)
+    server = AnalyticsServer(password=None)
+
+    page = server.app.test_client().get("/").get_data(as_text=True)
+
+    assert "(" not in page.split("Running version", 1)[1].split(".", 1)[0]
 
 
 def test_dashboard_hides_banner_for_dismissed_version_but_keeps_footer(monkeypatch):

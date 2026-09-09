@@ -422,7 +422,7 @@
             </div>
         </div>
         <footer class="analytics-footer">
-            <span>Running version {{ currentVersion }}.</span>
+            <span>Running version {{ currentVersion }}{% if buildCommit %} ({{ buildCommit }}){% endif %}.</span>
             {% if latestVersion %}
             <span class="footer-update-available">
                 <a href="{{ updateReleaseUrl }}" target="_blank" rel="noopener noreferrer">Upgrade available: {{ latestVersion }}</a>.

@@ -34,6 +34,12 @@ RESPONSE_CACHE_TTL_SECONDS = 10.0
 SHELL_BYPASS_TOKEN_ENV_VAR = "TCPM_SHELL_ANALYTICS_TOKEN"
 SHELL_BYPASS_COOKIE = "tcpm_shell_token"
 
+# Set by windows_launcher.py from its bundled commit_hash.txt (see
+# build_windows.bat) before starting the miner thread - unset (and the
+# footer line below just omitted) for Docker or a plain source checkout,
+# which have no such build-time artifact to read.
+BUILD_COMMIT_ENV_VAR = "TCPM_BUILD_COMMIT"
+
 # charts.html's own display preferences (dark mode, annotations, header
 # visibility, ...) - normally just localStorage on the browser making the
 # request, which works fine for a real browser tab or the Docker deployment.
@@ -484,6 +490,7 @@ def index(refresh=5, days_ago=7, log_poll_interval=5):
         ),
         updateDismissalCookie=UPDATE_DISMISSAL_COOKIE,
         dashboardPrefs=read_dashboard_prefs(),
+        buildCommit=os.environ.get(BUILD_COMMIT_ENV_VAR),
     )
 
 

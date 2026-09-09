@@ -15,12 +15,13 @@ import windows_launcher
 
 @pytest.fixture(autouse=True)
 def _isolate_shell_bypass_token_env(monkeypatch):
-    # main() sets this real env var directly (not via monkeypatch, since
-    # it must actually reach the AnalyticsServer thread it starts) so it
-    # survives past any one test's teardown; clearing it before every test
-    # here stops one test's main() call from leaking a token into another
-    # test's assertions about dashboard URLs.
+    # main() sets these real env vars directly (not via monkeypatch, since
+    # they must actually reach the AnalyticsServer thread it starts) so
+    # they survive past any one test's teardown; clearing them before every
+    # test here stops one test's main() call from leaking a token/commit
+    # hash into another test's assertions.
     monkeypatch.delenv(windows_launcher.SHELL_BYPASS_TOKEN_ENV_VAR, raising=False)
+    monkeypatch.delenv(windows_launcher.BUILD_COMMIT_ENV_VAR, raising=False)
 
 
 def _fake_launch_shell_recording(calls, extract=lambda dashboard_info, initial_tab: (
@@ -76,6 +77,32 @@ def test_is_standard_build_true_only_for_standard_marker(tmp_path, monkeypatch):
 
     marker.write_text("portable", encoding="utf-8")
     assert windows_launcher._is_standard_build() is False
+
+
+def test_build_commit_hash_reads_bundled_file(tmp_path, monkeypatch):
+    marker = tmp_path / "commit_hash.txt"
+    marker.write_text("abc1234\n", encoding="utf-8")
+    monkeypatch.setattr(windows_launcher, "bundled_file", lambda _name: marker)
+
+    assert windows_launcher._build_commit_hash() == "abc1234"
+
+
+def test_build_commit_hash_none_when_file_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        windows_launcher, "bundled_file", lambda _name: tmp_path / "does-not-exist.txt"
+    )
+
+    assert windows_launcher._build_commit_hash() is None
+
+
+def test_build_commit_hash_none_when_build_could_not_determine_one(tmp_path, monkeypatch):
+    # build_windows.bat writes the literal string "unknown" rather than
+    # leaving the file absent when git wasn't available at build time.
+    marker = tmp_path / "commit_hash.txt"
+    marker.write_text("unknown\n", encoding="utf-8")
+    monkeypatch.setattr(windows_launcher, "bundled_file", lambda _name: marker)
+
+    assert windows_launcher._build_commit_hash() is None
 
 
 def test_standard_application_directory_uses_localappdata(tmp_path, monkeypatch):
@@ -308,6 +335,44 @@ def test_application_directory_uses_source_directory(monkeypatch):
     assert windows_launcher.application_directory() == Path(
         windows_launcher.__file__
     ).resolve().parent
+
+
+def test_main_prints_and_exports_build_commit_when_available(tmp_path, monkeypatch, capsys):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
+    monkeypatch.setattr(windows_launcher, "_build_commit_hash", lambda: "abc1234")
+    monkeypatch.setattr(
+        windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe", "--convert-only"]
+    )
+
+    assert windows_launcher.main() == 0
+
+    assert "Build: abc1234" in capsys.readouterr().out
+    assert os.environ[windows_launcher.BUILD_COMMIT_ENV_VAR] == "abc1234"
+
+
+def test_main_skips_build_commit_output_when_unavailable(tmp_path, monkeypatch, capsys):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(windows_launcher, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(windows_launcher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(windows_launcher, "install_console_capture", lambda _buffer: None)
+    monkeypatch.setattr(windows_launcher, "runner_main", lambda argv, **kwargs: 0)
+    monkeypatch.setattr(windows_launcher, "_build_commit_hash", lambda: None)
+    monkeypatch.setattr(
+        windows_launcher.sys, "argv", ["TwitchChannelPointsMiner.exe", "--convert-only"]
+    )
+
+    assert windows_launcher.main() == 0
+
+    assert "Build:" not in capsys.readouterr().out
+    assert windows_launcher.BUILD_COMMIT_ENV_VAR not in os.environ
 
 
 def test_main_forwards_command_line_arguments(tmp_path, monkeypatch):
@@ -2560,9 +2625,15 @@ def test_single_instance_listener_shows_window_when_pinged(monkeypatch):
     window = FakeWindow()
     windows_launcher._start_single_instance_listener(window)
 
-    windows_launcher._notify_running_instance()
+    # The listener's background thread may not have bound/started
+    # listening yet by the time this runs - retry the ping instead of
+    # relying on a single attempt racing that startup.
+    for _attempt in range(20):
+        if window.shown.wait(timeout=0.1):
+            break
+        windows_launcher._notify_running_instance()
 
-    assert window.shown.wait(timeout=2) is True
+    assert window.shown.is_set() is True
 
 
 def test_notify_running_instance_is_silent_with_nothing_listening(monkeypatch):

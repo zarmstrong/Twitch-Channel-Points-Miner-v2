@@ -20,6 +20,16 @@ rem filename - renaming a file is trivial and would otherwise silently flip
 rem behavior.
 echo %BUILD_MODE%> install_mode.txt
 
+rem Also baked into the bundle - read back the same way, to show which
+rem commit a running build was made from (startup log line, dashboard
+rem footer). Always written (unlike being left absent) so the --add-data
+rem source path below always exists, even when git isn't available or this
+rem isn't a git checkout (e.g. a source archive) - falls back to "unknown"
+rem in that case rather than failing the build.
+set COMMIT_HASH=unknown
+for /f %%i in ('git rev-parse --short HEAD 2^>nul') do set COMMIT_HASH=%%i
+echo %COMMIT_HASH%> commit_hash.txt
+
 py -m PyInstaller ^
   --clean ^
   --noconfirm ^
@@ -35,10 +45,12 @@ py -m PyInstaller ^
   --add-data "assets;assets" ^
   --add-data "config.example.py;." ^
   --add-data "install_mode.txt;." ^
+  --add-data "commit_hash.txt;." ^
   windows_launcher.py
 
 set BUILD_RESULT=%ERRORLEVEL%
 del install_mode.txt
+del commit_hash.txt
 if not %BUILD_RESULT%==0 exit /b %BUILD_RESULT%
 
 echo.

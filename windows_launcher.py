@@ -49,6 +49,7 @@ if sys.stderr is None:
 
 from TwitchChannelPointsMiner import __version__  # noqa: E402
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (  # noqa: E402
+    BUILD_COMMIT_ENV_VAR,
     SHELL_BYPASS_TOKEN_ENV_VAR,
 )
 from TwitchChannelPointsMiner.config_editor import _assignment, _dict_item, _simple_value
@@ -111,6 +112,21 @@ def _build_install_mode():
 
 def _is_standard_build():
     return _build_install_mode() == "standard"
+
+
+def _build_commit_hash():
+    """Short commit hash this build was made from, baked in by
+    build_windows.bat the same way install_mode.txt is - or None for a
+    source checkout (no bundle to read from at all) or a build that
+    couldn't determine one (e.g. no git available at build time), which
+    build_windows.bat already writes as the literal string "unknown" for
+    exactly this case.
+    """
+    try:
+        commit = bundled_file("commit_hash.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return commit if commit and commit != "unknown" else None
 
 
 def _standard_application_directory():
@@ -1231,6 +1247,16 @@ def main():
 
     console_buffer = ConsoleBuffer()
     install_console_capture(console_buffer)
+
+    commit_hash = _build_commit_hash()
+    if commit_hash:
+        # Printed as early as possible so it's the first thing visible in
+        # the Console tab regardless of what else this run does - and set
+        # as an env var so AnalyticsServer's dashboard footer (running in
+        # a package that has no notion of a PyInstaller bundle to read
+        # commit_hash.txt from itself) can show it too.
+        print(f"Build: {commit_hash}")
+        os.environ[BUILD_COMMIT_ENV_VAR] = commit_hash
 
     # Always attempted for a standard build (never for portable, which has
     # nothing to migrate to), regardless of whether this turns out to be an
