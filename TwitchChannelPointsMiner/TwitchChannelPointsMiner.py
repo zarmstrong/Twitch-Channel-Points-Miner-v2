@@ -2065,8 +2065,19 @@ class TwitchChannelPointsMiner:
         # Prevent breaks of .json file
         for streamer in self.streamers:
             if streamer.mutex.locked():
-                streamer.mutex.acquire()
-                streamer.mutex.release()
+                # Bounded, unlike a bare acquire() - a save still in
+                # progress (e.g. a slow/hung disk write, or another thread
+                # queued behind it on the shared ANALYTICS_FILE_MUTEX) must
+                # not be able to hang shutdown forever, the same as every
+                # other join in this method already tolerates its thread
+                # not stopping in time.
+                if streamer.mutex.acquire(timeout=30):
+                    streamer.mutex.release()
+                else:
+                    logger.warning(
+                        f"Mutex for {streamer} did not release in time, "
+                        "continuing shutdown anyway"
+                    )
 
         self.__print_report()
 
