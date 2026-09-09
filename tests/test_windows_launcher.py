@@ -1730,9 +1730,35 @@ def test_run_miner_thread_reports_a_runtime_error_instead_of_crashing_silently(
 
 
 class _FakeEventSlot:
+    """Mirrors pywebview's own Event class closely enough for these tests:
+    a list of handlers managed via +=/-= (not a single slot), with .set()
+    running them all synchronously and returning True if any of them
+    returned False - matching should_lock=True's behavior for
+    window.events.closing specifically, including that multiple handlers
+    are genuinely supported (production code relies on this to swap the
+    tray Quit confirmation in for the normal hide-to-tray handler)."""
+
+    def __init__(self):
+        self._items = []
+
     def __iadd__(self, handler):
-        self.handler = handler
+        self._items.append(handler)
         return self
+
+    def __isub__(self, handler):
+        self._items.remove(handler)
+        return self
+
+    def set(self, *args, **kwargs):
+        results = [item() for item in self._items]
+        return any(result is False for result in results)
+
+    @property
+    def handler(self):
+        # Back-compat convenience for tests written against the old
+        # single-handler fake: the most recently added handler, matching
+        # how every one of those tests only ever adds one.
+        return self._items[-1] if self._items else None
 
 
 class _FakeEvents:
@@ -1753,6 +1779,12 @@ class _FakeWindow:
         self.hidden = True
 
     def destroy(self):
+        # Mirrors real WinForms semantics: Close() fires FormClosing (here,
+        # events.closing.set()) and only actually closes if no handler
+        # vetoes it - the same mechanism the window's own close button
+        # already relies on to turn a close into a hide instead.
+        if self.events.closing.set():
+            return
         self.destroyed = True
 
 
@@ -2313,22 +2345,23 @@ def test_launch_shell_wires_hide_to_tray_when_tray_is_available(tmp_path, monkey
     assert getattr(window, "hidden", False) is True
 
 
-def test_launch_shell_quit_from_tray_stops_miner_and_destroys_window(tmp_path, monkeypatch):
+def _launch_shell_with_tray(tmp_path, monkeypatch, miner_alive=True):
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
     monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
 
     captured = {}
+    tray_icon = _FakeTrayIcon()
 
     def fake_build_tray_icon(on_show, on_quit):
         captured["on_show"] = on_show
         captured["on_quit"] = on_quit
-        return _FakeTrayIcon()
+        return tray_icon
 
     monkeypatch.setattr(windows_launcher, "_build_tray_icon", fake_build_tray_icon)
 
     handle = windows_launcher._MinerThreadHandle()
-    handle.thread = _FakeMinerThread(alive=True)
+    handle.thread = _FakeMinerThread(alive=miner_alive)
     miner = _FakeMiner()
     handle.set_miner(miner)
 
@@ -2344,26 +2377,51 @@ def test_launch_shell_quit_from_tray_stops_miner_and_destroys_window(tmp_path, m
         None,
     )
 
-    window = fake_webview.window
-    dialog_saw_window_hidden = []
+    return fake_webview.window, captured, tray_icon, miner
+
+
+def test_launch_shell_quit_from_tray_stops_miner_and_destroys_window(tmp_path, monkeypatch):
+    window, captured, tray_icon, miner = _launch_shell_with_tray(tmp_path, monkeypatch)
+    hide_handler = window.events.closing.handler
+    dialog_calls = []
 
     def fake_dialog(title, message):
-        dialog_saw_window_hidden.append(window.hidden)
+        # Must run only once the hide handler has been swapped out -
+        # otherwise a real WinForms FormClosing veto from a leftover hide
+        # handler could cancel the close before this is even reached. This
+        # is what actually broke before: create_confirmation_dialog was
+        # called directly from pystray's own thread, unmarshaled, and could
+        # leave the app stuck after being answered - see
+        # _confirm_and_quit_from_tray's docstring.
+        dialog_calls.append(hide_handler not in window.events.closing._items)
         return True
 
     window.create_confirmation_dialog = fake_dialog
 
-    # Simulates the real sequence: minimized to tray (hidden) first, then
-    # Quit clicked from there - never actually shown again in between.
-    window.hide()
+    captured["on_quit"]()
+
+    assert dialog_calls == [True]
+    assert miner.calls == [(None, None)]
+    assert window.destroyed is True
+    assert tray_icon.stopped is True
+
+
+def test_launch_shell_quit_from_tray_cancelled_restores_hide_to_tray(tmp_path, monkeypatch):
+    window, captured, tray_icon, miner = _launch_shell_with_tray(tmp_path, monkeypatch)
+    hide_handler = window.events.closing.handler
+    window.create_confirmation_dialog = lambda title, message: False  # User clicks Cancel.
 
     captured["on_quit"]()
 
-    assert miner.calls == [(None, None)]
-    assert window.destroyed is True
-    # A dialog owned by a still-hidden window can render but be
-    # unclickable - the window must be shown again before it's created.
-    assert dialog_saw_window_hidden == [False]
+    assert window.destroyed is False
+    assert tray_icon.stopped is False
+    assert miner.calls == []
+    # The window must still hide-to-tray normally afterward, not be left
+    # with no closing handler at all (or the cancelled one-shot confirm
+    # handler still wired in).
+    assert window.events.closing.handler is hide_handler
+    assert window.events.closing.handler() is False
+    assert window.hidden is True
 
 
 def test_build_tray_icon_uses_bundled_icon_file(monkeypatch):

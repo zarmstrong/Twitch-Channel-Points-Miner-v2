@@ -1109,22 +1109,40 @@ def launch_shell(
     _start_single_instance_listener(window)
 
     tray_icon = None
+    hide_handler = None
+
+    def _confirm_and_quit_from_tray():
+        """A `window.events.closing` handler, temporarily swapped in by
+        `_quit_from_tray` below in place of the normal hide-to-tray one.
+
+        Critically, this makes it run on pywebview's actual GUI thread:
+        `events.closing` fires from inside WinForms' own FormClosing event,
+        itself reached only through `destroy()`, which pywebview properly
+        marshals onto that thread (`Control.Invoke`). pystray's Quit menu
+        item, by contrast, calls back on pystray's *own* icon thread - and
+        `create_confirmation_dialog` on Windows is a bare, unmarshaled
+        `MessageBox.Show()` with no thread-affinity handling of its own.
+        Calling it directly from there (as this used to) could leave the
+        whole app stuck after the dialog was answered, with no way to
+        actually quit short of killing the process. Routing through this
+        event instead keeps the entire confirm-then-stop sequence on the
+        thread WinForms actually expects it on.
+        """
+        window.events.closing -= _confirm_and_quit_from_tray
+        if not _make_close_confirmation_handler(window, miner_thread)():
+            # Cancelled - restore the normal hide-to-tray behavior for the
+            # next close/hide, whether that's this same tray Quit tried
+            # again or the window's own close button.
+            window.events.closing += hide_handler
+            return False
+        if tray_icon is not None:
+            tray_icon.stop()
+        return True
 
     def _quit_from_tray():
-        # Reuses the same confirm-then-stop-mining logic the close button
-        # used to run directly - it now only runs from the tray's Quit
-        # action, since closing the window itself just hides it (see below).
-        #
-        # Must un-hide first: a confirmation dialog owned by a still-hidden
-        # window can render but end up unclickable (no window to properly
-        # own/activate it), leaving no way to answer it short of killing
-        # the process - see _make_hide_to_tray_handler for the hide side of
-        # this.
-        window.show()
-        if _make_close_confirmation_handler(window, miner_thread)():
-            if tray_icon is not None:
-                tray_icon.stop()
-            window.destroy()
+        window.events.closing -= hide_handler
+        window.events.closing += _confirm_and_quit_from_tray
+        window.destroy()
 
     try:
         tray_icon = _build_tray_icon(window.show, _quit_from_tray)
@@ -1136,7 +1154,8 @@ def launch_shell(
 
     if tray_icon is not None:
         threading.Thread(target=tray_icon.run, name="Tray icon", daemon=True).start()
-        window.events.closing += _make_hide_to_tray_handler(window, tray_icon)
+        hide_handler = _make_hide_to_tray_handler(window, tray_icon)
+        window.events.closing += hide_handler
     else:
         window.events.closing += _make_close_confirmation_handler(window, miner_thread)
 
