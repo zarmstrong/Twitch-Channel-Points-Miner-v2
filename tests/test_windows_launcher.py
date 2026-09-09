@@ -1,5 +1,6 @@
 import builtins
 import http.server
+import json
 import os
 import shutil
 import socket
@@ -2830,6 +2831,208 @@ def test_window_api_set_autostart_delegates_to_helper(monkeypatch):
 
     assert calls == [True]
     assert result == {"success": True, "message": "Saved."}
+
+
+# --- close behavior (Settings tab) ------------------------------------------
+
+
+def test_read_close_behavior_defaults_to_tray_when_no_prefs_file(tmp_path):
+    assert windows_launcher._read_close_behavior(tmp_path / "config.py") == "tray"
+
+
+def test_write_then_read_close_behavior_round_trips(tmp_path):
+    config_path = tmp_path / "config.py"
+
+    success, message = windows_launcher._write_close_behavior(config_path, "quit")
+
+    assert success is True
+    assert message == "Saved."
+    assert windows_launcher._read_close_behavior(config_path) == "quit"
+
+
+def test_write_close_behavior_rejects_unknown_value(tmp_path):
+    success, message = windows_launcher._write_close_behavior(tmp_path / "config.py", "bogus")
+
+    assert success is False
+    assert "Invalid" in message
+
+
+def test_read_close_behavior_ignores_unrecognized_stored_value(tmp_path):
+    config_path = tmp_path / "config.py"
+    windows_launcher._shell_prefs_path(config_path).write_text(
+        '{"close_behavior": "bogus"}', encoding="utf-8"
+    )
+
+    assert windows_launcher._read_close_behavior(config_path) == "tray"
+
+
+def test_read_close_behavior_tolerates_corrupt_prefs_file(tmp_path):
+    config_path = tmp_path / "config.py"
+    windows_launcher._shell_prefs_path(config_path).write_text("not json", encoding="utf-8")
+
+    assert windows_launcher._read_close_behavior(config_path) == "tray"
+
+
+def test_write_close_behavior_preserves_other_keys_in_prefs_file(tmp_path):
+    config_path = tmp_path / "config.py"
+    windows_launcher._shell_prefs_path(config_path).write_text(
+        '{"other_setting": 42}', encoding="utf-8"
+    )
+
+    windows_launcher._write_close_behavior(config_path, "quit")
+
+    saved = json.loads(windows_launcher._shell_prefs_path(config_path).read_text(encoding="utf-8"))
+    assert saved == {"other_setting": 42, "close_behavior": "quit"}
+
+
+def test_make_close_dispatcher_routes_to_hide_handler_by_default():
+    calls = []
+    dispatcher = windows_launcher._make_close_dispatcher(
+        lambda: "tray", lambda: calls.append("hide") or False, lambda: calls.append("quit") or True
+    )
+
+    result = dispatcher()
+
+    assert calls == ["hide"]
+    assert result is False
+
+
+def test_make_close_dispatcher_routes_to_quit_handler_when_preference_is_quit():
+    calls = []
+    dispatcher = windows_launcher._make_close_dispatcher(
+        lambda: "quit", lambda: calls.append("hide") or False, lambda: calls.append("quit") or True
+    )
+
+    result = dispatcher()
+
+    assert calls == ["quit"]
+    assert result is True
+
+
+def test_window_api_get_close_behavior_info_reports_availability_and_value(tmp_path):
+    config_path = tmp_path / "config.py"
+    windows_launcher._write_close_behavior(config_path, "quit")
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(), None, None, config_path, False, lambda: None, None
+    )
+    api._tray_available = True
+
+    assert api.get_close_behavior_info() == {"available": True, "value": "quit"}
+
+
+def test_window_api_get_close_behavior_info_defaults_unavailable(tmp_path):
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(), None, None, tmp_path / "config.py", False, lambda: None, None
+    )
+
+    info = api.get_close_behavior_info()
+
+    assert info == {"available": False, "value": "tray"}
+
+
+def test_window_api_set_close_behavior_persists_value(tmp_path):
+    config_path = tmp_path / "config.py"
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(), None, None, config_path, False, lambda: None, None
+    )
+
+    result = api.set_close_behavior("quit")
+
+    assert result == {"success": True, "message": "Saved."}
+    assert windows_launcher._read_close_behavior(config_path) == "quit"
+
+
+def test_window_api_get_about_info_reports_version_and_commit(tmp_path, monkeypatch):
+    monkeypatch.setattr(windows_launcher, "_build_commit_hash", lambda: "abc1234")
+    api = windows_launcher.WindowApi(
+        windows_launcher.ConsoleBuffer(), None, None, tmp_path / "config.py", False, lambda: None, None
+    )
+
+    info = api.get_about_info()
+
+    assert info["version"] == windows_launcher.__version__
+    assert info["commit"] == "abc1234"
+
+
+def test_launch_shell_close_button_quits_immediately_when_preference_is_quit(tmp_path, monkeypatch):
+    fake_webview = _FakeWebview()
+    _patch_fake_webview(monkeypatch, fake_webview)
+    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_build_tray_icon", lambda on_show, on_quit: _FakeTrayIcon()
+    )
+    config_path = tmp_path / "config.py"
+    windows_launcher._write_close_behavior(config_path, "quit")
+
+    windows_launcher.launch_shell(
+        None,
+        windows_launcher.ConsoleBuffer(),
+        None,
+        _FakeMinerThread(alive=False),
+        config_path,
+        tmp_path / ".shell_analytics_prompt_shown",
+        False,
+        lambda: None,
+        None,
+    )
+
+    window = fake_webview.window
+    # No miner running, so the confirm-and-quit handler allows the close
+    # outright rather than hiding to the tray - proving the preference (not
+    # just tray availability) decides the behavior.
+    assert window.events.closing.handler() is True
+
+
+def test_launch_shell_exposes_tray_availability_to_window_api(tmp_path, monkeypatch):
+    fake_webview = _FakeWebview()
+    _patch_fake_webview(monkeypatch, fake_webview)
+    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher, "_build_tray_icon", lambda on_show, on_quit: _FakeTrayIcon()
+    )
+
+    windows_launcher.launch_shell(
+        None,
+        windows_launcher.ConsoleBuffer(),
+        None,
+        _FakeMinerThread(alive=False),
+        tmp_path / "config.py",
+        tmp_path / ".shell_analytics_prompt_shown",
+        False,
+        lambda: None,
+        None,
+    )
+
+    assert fake_webview.create_window_kwargs['js_api']._tray_available is True
+
+
+def test_launch_shell_tray_unavailable_leaves_window_api_reporting_it(tmp_path, monkeypatch):
+    fake_webview = _FakeWebview()
+    _patch_fake_webview(monkeypatch, fake_webview)
+    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    monkeypatch.setattr(
+        windows_launcher,
+        "_build_tray_icon",
+        lambda on_show, on_quit: (_ for _ in ()).throw(RuntimeError("no tray")),
+    )
+
+    windows_launcher.launch_shell(
+        None,
+        windows_launcher.ConsoleBuffer(),
+        None,
+        _FakeMinerThread(alive=False),
+        tmp_path / "config.py",
+        tmp_path / ".shell_analytics_prompt_shown",
+        False,
+        lambda: None,
+        None,
+    )
+
+    assert fake_webview.create_window_kwargs['js_api']._tray_available is False
+    assert fake_webview.create_window_kwargs['js_api'].get_close_behavior_info() == {
+        "available": False,
+        "value": "tray",
+    }
 
 
 # --- --start-minimized -----------------------------------------------------

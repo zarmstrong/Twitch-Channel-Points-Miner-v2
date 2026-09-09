@@ -4,6 +4,7 @@
 
 import ast
 import ctypes  # cross-platform stdlib module; only .windll is Windows-only (guarded below)
+import json
 import os
 import secrets
 import shutil
@@ -71,6 +72,9 @@ _TRAY_ICON_FILE = "twitch-miner.ico"
 _AUTOSTART_VALUE_NAME = "TwitchChannelPointsMiner"
 _AUTOSTART_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _START_MINIMIZED_FLAG = "--start-minimized"
+_SHELL_PREFS_FILENAME = "shell_prefs.json"
+_CLOSE_BEHAVIOR_TRAY = "tray"
+_CLOSE_BEHAVIOR_QUIT = "quit"
 # Session-local (not "Global\\") - matches the rest of this launcher's
 # per-user assumptions (e.g. the autostart registry key lives under HKCU),
 # and avoids needing any elevated privilege to create.
@@ -776,6 +780,45 @@ def _make_hide_to_tray_handler(window, tray_icon):
     return on_closing
 
 
+def _shell_prefs_path(config_path):
+    """Where the Settings tab's own small preferences (currently just the
+    close behavior) live - beside config.py, so it moves with the rest of a
+    user's data the same way config/cookies/analytics already do, without
+    needing its own directory-resolution logic."""
+    return config_path.parent / _SHELL_PREFS_FILENAME
+
+
+def _read_shell_prefs(config_path):
+    try:
+        return json.loads(_shell_prefs_path(config_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _read_close_behavior(config_path):
+    """What the window's own close button (X) should do - "tray" (hide,
+    mining keeps running - the default) or "quit" (stop mining, same
+    confirm-then-close flow as the tray icon's own Quit item). Any missing
+    or unrecognized value falls back to "tray", the long-standing default
+    behavior."""
+    value = _read_shell_prefs(config_path).get("close_behavior")
+    return value if value in (_CLOSE_BEHAVIOR_TRAY, _CLOSE_BEHAVIOR_QUIT) else _CLOSE_BEHAVIOR_TRAY
+
+
+def _write_close_behavior(config_path, value):
+    """Persist the close-behavior choice. Returns (success, message), the
+    same contract as _enable_dashboard_from_shell/set_autostart_enabled."""
+    if value not in (_CLOSE_BEHAVIOR_TRAY, _CLOSE_BEHAVIOR_QUIT):
+        return False, "Invalid value."
+    prefs = _read_shell_prefs(config_path)
+    prefs["close_behavior"] = value
+    try:
+        _shell_prefs_path(config_path).write_text(json.dumps(prefs), encoding="utf-8")
+    except OSError as error:
+        return False, f"Could not save this setting: {error}"
+    return True, "Saved."
+
+
 def _autostart_command():
     """Command line to register for "start on Windows login" - only
     meaningful for a frozen (PyInstaller) build; a source checkout has no
@@ -856,6 +899,13 @@ class WindowApi:
         self._needs_username = needs_username
         self._start_mining = start_mining
         self._logs_dir = logs_dir
+        # Set by launch_shell once it knows whether the tray icon actually
+        # came up (pystray/Pillow missing, bad icon, no desktop tray, ...) -
+        # unknown/False at construction time since the tray is only built
+        # after this object already exists. The Settings tab uses this to
+        # hide the "minimize to tray" choice when there'd be no tray to
+        # minimize to.
+        self._tray_available = False
 
     def get_console_tail(self, since_seq=0):
         lines, next_seq = self._console_buffer.tail(int(since_seq or 0))
@@ -954,6 +1004,22 @@ class WindowApi:
         success, message = set_autostart_enabled(bool(enabled))
         return {"success": success, "message": message}
 
+    def get_close_behavior_info(self):
+        return {
+            "available": self._tray_available,
+            "value": _read_close_behavior(self._config_path),
+        }
+
+    def set_close_behavior(self, value):
+        success, message = _write_close_behavior(self._config_path, value)
+        return {"success": success, "message": message}
+
+    def get_about_info(self):
+        return {
+            "version": __version__,
+            "commit": _build_commit_hash(),
+        }
+
 
 def _open_folder(path):
     """Best-effort: open `path` in the OS file manager, creating it first if
@@ -1044,6 +1110,22 @@ def _make_close_confirmation_handler(window, miner_thread):
     return on_closing
 
 
+def _make_close_dispatcher(get_close_behavior, hide_handler, quit_handler):
+    """Build the normal (non-tray-Quit) `window.events.closing` handler,
+    routing to hide-to-tray or confirm-and-quit based on the user's saved
+    close-behavior preference (see _read_close_behavior/_write_close_behavior,
+    exposed through the Settings tab). Re-read on every close rather than
+    captured once, so a preference change takes effect immediately without
+    restarting the app."""
+
+    def on_closing():
+        if get_close_behavior() == _CLOSE_BEHAVIOR_QUIT:
+            return quit_handler()
+        return hide_handler()
+
+    return on_closing
+
+
 def _stop_miner_gracefully(miner_thread_handle):
     """Runs the same clean shutdown a SIGINT/SIGTERM would have triggered
     (IRC chat leave, websocket pool teardown, watcher-thread joins, final
@@ -1125,11 +1207,12 @@ def launch_shell(
     _start_single_instance_listener(window)
 
     tray_icon = None
-    hide_handler = None
+    normal_handler = None
+    quit_handler = _make_close_confirmation_handler(window, miner_thread)
 
     def _confirm_and_quit_from_tray():
         """A `window.events.closing` handler, temporarily swapped in by
-        `_quit_from_tray` below in place of the normal hide-to-tray one.
+        `_quit_from_tray` below in place of the normal handler.
 
         Critically, this makes it run on pywebview's actual GUI thread:
         `events.closing` fires from inside WinForms' own FormClosing event,
@@ -1145,18 +1228,18 @@ def launch_shell(
         thread WinForms actually expects it on.
         """
         window.events.closing -= _confirm_and_quit_from_tray
-        if not _make_close_confirmation_handler(window, miner_thread)():
-            # Cancelled - restore the normal hide-to-tray behavior for the
-            # next close/hide, whether that's this same tray Quit tried
-            # again or the window's own close button.
-            window.events.closing += hide_handler
+        if not quit_handler():
+            # Cancelled - restore the normal close behavior for the next
+            # close/hide, whether that's this same tray Quit tried again or
+            # the window's own close button.
+            window.events.closing += normal_handler
             return False
         if tray_icon is not None:
             tray_icon.stop()
         return True
 
     def _quit_from_tray():
-        window.events.closing -= hide_handler
+        window.events.closing -= normal_handler
         window.events.closing += _confirm_and_quit_from_tray
         window.destroy()
 
@@ -1168,12 +1251,17 @@ def launch_shell(
         # rather than leave the app with no way to quit at all.
         tray_icon = None
 
+    api._tray_available = tray_icon is not None
+
     if tray_icon is not None:
         threading.Thread(target=tray_icon.run, name="Tray icon", daemon=True).start()
         hide_handler = _make_hide_to_tray_handler(window, tray_icon)
-        window.events.closing += hide_handler
+        normal_handler = _make_close_dispatcher(
+            lambda: _read_close_behavior(config_path), hide_handler, quit_handler
+        )
     else:
-        window.events.closing += _make_close_confirmation_handler(window, miner_thread)
+        normal_handler = quit_handler
+    window.events.closing += normal_handler
 
     def _on_started():
         # Dialogs (unlike event handlers) require the GUI loop that
