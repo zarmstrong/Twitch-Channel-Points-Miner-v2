@@ -5018,8 +5018,13 @@ class Twitch(object):
                     if isinstance(drop_self, dict):
                         is_claimed = drop_self.get("isClaimed") is True
                         drop_instance_id = drop_self.get("dropInstanceID")
-                        is_claimable = (is_claimed is False) and (
-                            drop_instance_id is not None
+                        # campaign_ref.sync_drops() above already attempts to claim
+                        # any matching drop it tracks, so only fall back to claiming
+                        # here when we have no local campaign to have done that.
+                        is_claimable = (
+                            (is_claimed is False)
+                            and (drop_instance_id is not None)
+                            and (campaign_ref is None)
                         )
                         if is_claimable is True:
                             try:
@@ -5377,6 +5382,7 @@ class Twitch(object):
             return False
         try:
             if response.errors:
+                logger.error(f"Unable to claim {drop}: {response.errors}")
                 return False
             if response.status in [
                 "ELIGIBLE_FOR_ALL",
@@ -5407,6 +5413,7 @@ class Twitch(object):
                         item_art_url_override=variant.get("item_art_url"),
                     )
                 return True
+            logger.error(f"Unable to claim {drop}: unexpected status {response.status}")
             return False
         except (AttributeError, TypeError):
             return False
