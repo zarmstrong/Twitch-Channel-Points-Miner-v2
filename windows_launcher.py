@@ -1089,23 +1089,40 @@ def _make_close_confirmation_handler(window, miner_thread):
 
     `miner_thread` only needs an `is_alive()` method - a plain Thread, or a
     _MinerThreadHandle for a thread that may not exist yet, both work.
+
+    Guarded by a non-blocking lock against reentrant calls: pywebview's
+    WinForms confirmation dialog is a bare `MessageBox.Show()` with no
+    owner window, so it does not disable the underlying form - clicking
+    the window's close button again (or tray Quit again) while it's up
+    re-fires WinForms' FormClosing before this handler has returned.
+    Without the guard, that reentrant call would show a second dialog and
+    - if confirmed - actually close/dispose the form from inside the
+    nested call; the outer call then resumes and tries to close the
+    (already-disposed) form again, which crashes pywebview trying to
+    remove the same window uid from its instance table twice.
     """
+    in_progress = threading.Lock()
 
     def on_closing():
         if not miner_thread.is_alive():
             return True
-        try:
-            confirmed = window.create_confirmation_dialog(
-                "Stop mining?",
-                "Closing this window will stop mining. Are you sure?",
-            )
-        except Exception:
-            # If the dialog itself can't be shown, err on the side of NOT
-            # silently stopping an unattended miner.
+        if not in_progress.acquire(blocking=False):
             return False
-        if confirmed:
-            _stop_miner_gracefully(miner_thread)
-        return confirmed
+        try:
+            try:
+                confirmed = window.create_confirmation_dialog(
+                    "Stop mining?",
+                    "Closing this window will stop mining. Are you sure?",
+                )
+            except Exception:
+                # If the dialog itself can't be shown, err on the side of NOT
+                # silently stopping an unattended miner.
+                return False
+            if confirmed:
+                _stop_miner_gracefully(miner_thread)
+            return confirmed
+        finally:
+            in_progress.release()
 
     return on_closing
 
@@ -1209,6 +1226,7 @@ def launch_shell(
     tray_icon = None
     normal_handler = None
     quit_handler = _make_close_confirmation_handler(window, miner_thread)
+    confirm_from_tray_lock = threading.Lock()
 
     def _confirm_and_quit_from_tray():
         """A `window.events.closing` handler, temporarily swapped in by
@@ -1226,14 +1244,35 @@ def launch_shell(
         actually quit short of killing the process. Routing through this
         event instead keeps the entire confirm-then-stop sequence on the
         thread WinForms actually expects it on.
+
+        Stays registered on `window.events.closing` for the whole call,
+        including while `quit_handler()` is blocked showing its
+        confirmation dialog - removing it first (as this used to) leaves
+        no handler registered during that window, so a reentrant close
+        (a real, unowned WinForms MessageBox doesn't stop clicks from
+        reaching the underlying form - e.g. its own [X] clicked again
+        while this dialog is up) would sail through uncancelled instead of
+        being cancelled here. Guarded by its own lock, acquired before
+        calling `quit_handler()` and released after, so that reentrant
+        call - reached via a nested `events.closing.set()` while this one
+        is still on the stack - is cancelled outright without touching
+        event registration at all; only the outer call ever adds/removes
+        handlers.
         """
-        window.events.closing -= _confirm_and_quit_from_tray
-        if not quit_handler():
+        if not confirm_from_tray_lock.acquire(blocking=False):
+            return False
+        try:
+            confirmed = quit_handler()
+        finally:
+            confirm_from_tray_lock.release()
+        if not confirmed:
             # Cancelled - restore the normal close behavior for the next
             # close/hide, whether that's this same tray Quit tried again or
             # the window's own close button.
+            window.events.closing -= _confirm_and_quit_from_tray
             window.events.closing += normal_handler
             return False
+        window.events.closing -= _confirm_and_quit_from_tray
         if tray_icon is not None:
             tray_icon.stop()
         return True

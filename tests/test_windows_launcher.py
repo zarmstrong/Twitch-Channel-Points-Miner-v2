@@ -1718,6 +1718,36 @@ def test_close_confirmation_blocks_close_if_dialog_itself_fails():
     assert handler() is False
 
 
+def test_close_confirmation_cancels_reentrant_call_while_dialog_is_open():
+    """A real, unowned WinForms MessageBox doesn't disable the underlying
+    form, so this handler can be reentered (e.g. the window's [X] clicked
+    again) while its own dialog is still showing. The reentrant call must
+    be cancelled outright rather than showing a second dialog - letting it
+    through used to let a nested close actually happen, crashing once the
+    outer call resumed and tried to close the (already-closed) window
+    again."""
+
+    class FakeWindow:
+        def __init__(self):
+            self.calls = []
+            self.handler = None
+
+        def create_confirmation_dialog(self, title, message):
+            self.calls.append((title, message))
+            reentrant_result = self.handler()
+            assert reentrant_result is False
+            return True
+
+    window = FakeWindow()
+    handler = windows_launcher._make_close_confirmation_handler(
+        window, _FakeMinerThread(alive=True)
+    )
+    window.handler = handler
+
+    assert handler() is True
+    assert len(window.calls) == 1
+
+
 class _FakeWindowConfirms:
     def create_confirmation_dialog(self, title, message):
         return True
@@ -2467,6 +2497,35 @@ def test_launch_shell_quit_from_tray_stops_miner_and_destroys_window(tmp_path, m
     captured["on_quit"]()
 
     assert dialog_calls == [True]
+    assert miner.calls == [(None, None)]
+    assert window.destroyed is True
+    assert tray_icon.stopped is True
+
+
+def test_launch_shell_quit_from_tray_reentrant_close_is_cancelled(tmp_path, monkeypatch):
+    """A second close attempt while the tray-Quit confirmation dialog is
+    still open (e.g. the window's own [X] clicked again) must be cancelled
+    outright, not reach create_confirmation_dialog or destroy() a second
+    time. A real, unowned WinForms MessageBox doesn't block clicks from
+    reaching the underlying form, so this reentrant FormClosing is a real
+    scenario - letting it through used to close/dispose the window from
+    inside the nested call and crash once the outer call resumed and tried
+    to close it again (pywebview raising KeyError on its window-instance
+    table). See _make_close_confirmation_handler's docstring."""
+    window, captured, tray_icon, miner = _launch_shell_with_tray(tmp_path, monkeypatch)
+    dialog_calls = []
+
+    def fake_dialog(title, message):
+        dialog_calls.append(1)
+        reentrant_cancelled = window.events.closing.set()
+        assert reentrant_cancelled is True
+        return True
+
+    window.create_confirmation_dialog = fake_dialog
+
+    captured["on_quit"]()
+
+    assert dialog_calls == [1]
     assert miner.calls == [(None, None)]
     assert window.destroyed is True
     assert tray_icon.stopped is True
