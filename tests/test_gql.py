@@ -1201,7 +1201,9 @@ def test_dashboard_extraction_ignores_non_campaign_values():
         )
     )
 
-    assert twitch._Twitch__get_drops_dashboard() == [{"id": "campaign-1"}]
+    assert twitch._Twitch__get_drops_dashboard() == [
+        {"id": "campaign-1", "_is_reward_campaign": False}
+    ]
 
 
 def test_campaign_details_retries_viewer_context_after_null_user():

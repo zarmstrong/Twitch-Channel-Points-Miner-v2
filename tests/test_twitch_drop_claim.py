@@ -983,6 +983,146 @@ def test_active_campaign_keeps_authenticated_channel_allowlist(monkeypatch):
     }
 
 
+def test_subscription_reward_campaign_is_never_active_incomplete(monkeypatch):
+    # Regression: a purchase-gated Reward Campaign (e.g. "subscribe or gift a
+    # sub to claim this badge") must never be treated as a minable, watch-time
+    # drop campaign, and its (correctly negative) verdict must not poison the
+    # game's category eligibility for a separate, genuinely watchable
+    # campaign that only the external gist fallback knows about.
+    twitch = bare_twitch(monkeypatch)
+    reward_campaign = {
+        "id": "reward-campaign-1",
+        "game": {"displayName": "Example Game"},
+        "name": "Sub Badge Launch",
+        "status": "ACTIVE",
+        "allow": {"channels": []},
+        "startAt": "2020-01-01T00:00:00Z",
+        "endAt": "2099-01-01T00:00:00Z",
+        "_is_reward_campaign": True,
+        "timeBasedDrops": [
+            {
+                "id": "sub-badge-drop",
+                "name": "Sub Badge",
+                "benefitEdges": [{"benefit": {"name": "Sub Badge"}}],
+                "requiredMinutesWatched": 0,
+                "startAt": "2020-01-01T00:00:00Z",
+                "endAt": "2099-01-01T00:00:00Z",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_drops_dashboard",
+        lambda self, status="OPEN": [reward_campaign],
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_reward_campaigns_raw_query",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_open_drop_campaigns_from_helix",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, campaign_channel_id_by_id=None: campaigns,
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__awarded_benefits",
+        lambda self, inventory: (set(), set()),
+    )
+
+    deadlines, twitch_games = twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {}, {"example-game"}
+    )
+
+    # No watchable campaign was found -- correct.
+    assert deadlines == {}
+    # But Twitch must not be considered to have authoritatively evaluated
+    # this game, since only a purchase-gated campaign was inspected: a
+    # genuinely incomplete drop campaign the gist fallback finds for this
+    # same game_slug must still be allowed through in
+    # filter_categories_with_active_drops.
+    assert twitch_games == set()
+    assert twitch.active_drop_campaigns == {}
+
+
+def test_watchable_campaign_survives_alongside_reward_campaign_for_same_game(
+    monkeypatch,
+):
+    # Two campaigns for the same game: one purchase-gated (ignored), one
+    # genuine watch-time drop campaign (must still be picked up normally).
+    twitch = bare_twitch(monkeypatch)
+    drop_campaign = campaign_data()
+    drop_campaign["timeBasedDrops"][0]["self"] = {
+        "hasPreconditionsMet": True,
+        "currentMinutesWatched": 0,
+        "dropInstanceID": None,
+        "isClaimed": False,
+    }
+    reward_campaign = {
+        "id": "reward-campaign-1",
+        "game": {"displayName": "Example Game"},
+        "name": "Sub Badge Launch",
+        "status": "ACTIVE",
+        "allow": {"channels": []},
+        "startAt": "2020-01-01T00:00:00Z",
+        "endAt": "2099-01-01T00:00:00Z",
+        "_is_reward_campaign": True,
+        "timeBasedDrops": [
+            {
+                "id": "sub-badge-drop",
+                "name": "Sub Badge",
+                "benefitEdges": [{"benefit": {"name": "Sub Badge"}}],
+                "requiredMinutesWatched": 0,
+                "startAt": "2020-01-01T00:00:00Z",
+                "endAt": "2099-01-01T00:00:00Z",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_drops_dashboard",
+        lambda self, status="OPEN": [drop_campaign, reward_campaign],
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_reward_campaigns_raw_query",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_open_drop_campaigns_from_helix",
+        lambda self: ([], []),
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__get_campaigns_details",
+        lambda self, campaigns, campaign_channel_id_by_id=None: campaigns,
+    )
+    monkeypatch.setattr(
+        Twitch,
+        "_Twitch__awarded_benefits",
+        lambda self, inventory: (set(), set()),
+    )
+
+    deadlines, twitch_games = twitch._Twitch__active_drop_category_slugs_from_campaigns(
+        {}, {"example-game"}
+    )
+
+    assert set(deadlines) == {"example-game"}
+    assert twitch_games == {"example-game"}
+    assert twitch.active_drop_campaigns == {
+        "example-game": [
+            {"id": "campaign-1", "name": "Example Campaign", "channels": []}
+        ]
+    }
+
+
 def test_completed_campaign_game_is_resolved_when_open_dashboard_omits_it(
     monkeypatch,
 ):

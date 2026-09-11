@@ -1571,7 +1571,17 @@ class Twitch(object):
                 continue
             campaign_id = campaign.get("id")
             if campaign_id not in [None, ""]:
-                campaigns_by_id[str(campaign_id)] = campaign
+                campaign_id = str(campaign_id)
+                # DropCampaignDetails doesn't distinguish drop vs reward
+                # campaigns, so carry the earn-mechanism tag over from the
+                # pre-refresh record rather than losing it here.
+                previous = campaigns_by_id.get(campaign_id)
+                if previous is not None:
+                    campaign.setdefault(
+                        "_is_reward_campaign",
+                        previous.get("_is_reward_campaign", False),
+                    )
+                campaigns_by_id[campaign_id] = campaign
 
         # Older inventory variants expose only campaign IDs. Resolve any IDs
         # missing from the available records so their games remain authoritative.
@@ -1617,11 +1627,17 @@ class Twitch(object):
         for campaign_id, campaign in campaigns_by_id.items():
             if not isinstance(campaign, dict):
                 continue
+            is_reward_campaign = campaign.get("_is_reward_campaign") is True
             game = campaign.get("game") or {}
             game_name = (game.get("displayName") or game.get("name") or "").strip()
             game_slug = self.__slugify(game_name) if game_name else ""
             if campaign_id in completed_campaign_ids:
-                if game_slug:
+                # A purchase-gated reward campaign's completion status says
+                # nothing about a separate, still-incomplete drop campaign
+                # for the same game -- don't let it mark this game_slug as
+                # Twitch-evaluated, or it would suppress a legitimate
+                # external/gist deadline for that other campaign below.
+                if game_slug and is_reward_campaign is not True:
                     self.campaign_game_slugs[campaign_id] = game_slug
                 campaign_evaluations.append(
                     {
@@ -1632,7 +1648,7 @@ class Twitch(object):
                         "skip_reason": "completed_campaign",
                     }
                 )
-                if game_name:
+                if game_name and is_reward_campaign is not True:
                     twitch_category_slugs.add(game_slug)
                 continue
             inventory_campaign = inventory_campaigns.get(campaign_id)
@@ -1643,7 +1659,7 @@ class Twitch(object):
                 game = campaign.get("game") or {}
                 game_name = (game.get("displayName") or game.get("name") or "").strip()
                 game_slug = self.__slugify(game_name) if game_name else ""
-            if game_slug:
+            if game_slug and is_reward_campaign is not True:
                 self.campaign_game_slugs[campaign_id] = game_slug
                 twitch_category_slugs.add(game_slug)
             matches_configured_category = _slug_requested(game_slug)
@@ -1666,6 +1682,15 @@ class Twitch(object):
                     if game_slug == ""
                     else "category_not_configured"
                 )
+                campaign_evaluations.append(evaluation)
+                continue
+
+            if is_reward_campaign is True:
+                # Completed by subscribing/gifting/cheering, not by watch
+                # time -- never minable, and must not stand in as the
+                # authoritative verdict for this game's category eligibility.
+                evaluation["active_incomplete"] = None
+                evaluation["skip_reason"] = "requires_subscription_or_purchase"
                 campaign_evaluations.append(evaluation)
                 continue
 
@@ -4552,6 +4577,9 @@ class Twitch(object):
             )
 
         campaigns = list(campaigns_by_id.values())
+        for campaign in campaigns:
+            if isinstance(campaign, dict):
+                campaign["_is_reward_campaign"] = True
         debug["total_unique"] = len(campaigns)
         return campaigns, debug
 
@@ -4625,17 +4653,32 @@ class Twitch(object):
         current_user = data.get("currentUser", {})
         campaigns = []
 
-        for key in [
-            "dropCampaigns",
-            "rewardCampaigns",
-            "dropCampaignsInProgress",
-            "rewardCampaignsInProgress",
+        # Twitch's schema splits campaigns by how they're completed, not by
+        # what they reward: dropCampaigns* are finished with watch time
+        # (regardless of whether the prize is an in-game item or a badge),
+        # while rewardCampaigns* require spending money (subscribing,
+        # gifting, cheering). Tag each campaign with its earn-mechanism here,
+        # at the only point where the source field name is still known, so
+        # later eligibility checks can exclude purchase-gated campaigns
+        # without touching genuine watch-time badge drops.
+        for key, is_reward in [
+            ("dropCampaigns", False),
+            ("rewardCampaigns", True),
+            ("dropCampaignsInProgress", False),
+            ("rewardCampaignsInProgress", True),
         ]:
-            campaigns.extend(current_user.get(key, []) or [])
+            for campaign in current_user.get(key, []) or []:
+                if isinstance(campaign, dict):
+                    campaign.setdefault("_is_reward_campaign", is_reward)
+                campaigns.append(campaign)
 
         # Twitch may place globally available reward campaigns here.
-        campaigns.extend(data.get("rewardCampaignsAvailableToUser", []) or [])
-        campaigns.extend(current_user.get("rewardCampaignsAvailableToUser", []) or [])
+        for campaign in list(
+            data.get("rewardCampaignsAvailableToUser", []) or []
+        ) + list(current_user.get("rewardCampaignsAvailableToUser", []) or []):
+            if isinstance(campaign, dict):
+                campaign.setdefault("_is_reward_campaign", True)
+            campaigns.append(campaign)
 
         campaigns_by_id = {}
         for campaign in campaigns:
