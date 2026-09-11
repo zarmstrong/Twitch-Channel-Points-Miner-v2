@@ -375,6 +375,33 @@ def test_unlisted_reward_campaign_still_falls_back_to_gist_drop_campaign(monkeyp
     assert ("example-game", "drops-channel") not in twitch.category_campaign_eligibility
 
 
+def test_campaign_names_from_ids_resolves_before_sync_campaigns_catches_up(monkeypatch):
+    # Regression: stream.campaigns (the source __describe_campaigns reads)
+    # is only populated by the slower sync_campaigns background pass, so a
+    # just-selected streamer's watch log fell back to a bare "<game> drops"
+    # label instead of naming the specific campaign -- unhelpful when a game
+    # has more than one active drop campaign at once. Resolve names directly
+    # from whichever discovery source populated campaigns_ids instead.
+    twitch = bare_twitch(monkeypatch)
+    twitch.advertised_drop_campaigns = {
+        "advertised-1": {"id": "advertised-1", "name": "Advertised Campaign"}
+    }
+    twitch.twitchdrops_app_campaigns = {
+        "example-game": [{"id": "gist-1", "name": "Gist Campaign", "channels": []}]
+    }
+    twitch.active_drop_campaigns = {
+        "example-game": [
+            {"id": "native-1", "name": "Native Campaign", "channels": []}
+        ]
+    }
+
+    names = twitch._Twitch__campaign_names_from_ids(
+        ["advertised-1", "gist-1", "native-1", "unknown-id"], "example-game"
+    )
+
+    assert set(names) == {"Advertised Campaign", "Gist Campaign", "Native Campaign"}
+
+
 def test_channel_not_in_authoritative_campaign_allowlist_still_blocked(monkeypatch):
     # The same authoritative campaign exists, but this channel isn't on its
     # allow-list, so the empty channel query result must still stand.

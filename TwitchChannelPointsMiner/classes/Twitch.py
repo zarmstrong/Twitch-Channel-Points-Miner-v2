@@ -2502,6 +2502,43 @@ class Twitch(object):
 
         return ", ".join(unique_labels)
 
+    def __campaign_names_from_ids(self, campaign_ids, game_slug):
+        """Resolve campaign names for `stream.campaigns_ids` before the
+        slower sync_campaigns background pass has enriched
+        `stream.campaigns` with full Campaign objects. Falls back through
+        every source `__get_campaign_ids_from_streamer` can have populated:
+        per-channel advertised campaigns, the gist fallback, and Twitch's own
+        authoritative (native) campaign data -- in that order, since IDs can
+        come from any of them.
+        """
+        names = {}
+        remaining = {str(campaign_id) for campaign_id in campaign_ids or []}
+        if not remaining:
+            return []
+
+        for campaign_id in list(remaining):
+            campaign = self.advertised_drop_campaigns.get(campaign_id)
+            if isinstance(campaign, dict) and campaign.get("name"):
+                names[campaign_id] = campaign["name"]
+                remaining.discard(campaign_id)
+
+        if remaining:
+            for source in (
+                self.twitchdrops_app_campaigns.get(game_slug, []),
+                self.active_drop_campaigns.get(game_slug, []),
+            ):
+                if not remaining:
+                    break
+                for campaign in source or []:
+                    if not isinstance(campaign, dict):
+                        continue
+                    campaign_id = str(campaign.get("id") or "")
+                    if campaign_id in remaining and campaign.get("name"):
+                        names[campaign_id] = campaign["name"]
+                        remaining.discard(campaign_id)
+
+        return [names[campaign_id] for campaign_id in names]
+
     def __campaign_signature(self, campaigns):
         campaign_ids = [
             campaign.id for campaign in campaigns or [] if getattr(campaign, "id", None)
@@ -2705,14 +2742,30 @@ class Twitch(object):
                 continue
 
             campaigns = self.__describe_campaigns(streamer.stream.campaigns)
+            game_label = self.__stream_game_label(streamer.stream)
+            if not campaigns:
+                # stream.campaigns is only enriched by the slower
+                # sync_campaigns background pass, so a just-selected streamer
+                # can still be showing a bare "<game> drops" label here. Try
+                # resolving the specific campaign name(s) from
+                # campaigns_ids/discovery state instead, since a game can
+                # have more than one active drop campaign at once and which
+                # one is actually being watched is worth knowing immediately.
+                names = self.__campaign_names_from_ids(
+                    getattr(streamer.stream, "campaigns_ids", []),
+                    self.__slugify(game_label) if game_label else "",
+                )
+                if names:
+                    campaigns = ", ".join(
+                        dict.fromkeys(
+                            f"{game_label} drop campaign '{name}'" for name in names
+                        )
+                    )
             reason = watch_reason(streamer)
             drops_streams.append(
                 f"{streamer.username} ({reason}; {campaigns})"
                 if campaigns
-                else (
-                    f"{streamer.username} "
-                    f"({reason}; {self.__stream_game_label(streamer.stream)} drops)"
-                )
+                else f"{streamer.username} ({reason}; {game_label} drops)"
             )
 
         logger.info(
