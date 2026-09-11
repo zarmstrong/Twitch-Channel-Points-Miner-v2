@@ -4179,13 +4179,29 @@ class Twitch(object):
                 continue
             campaign_id = str(campaign.get("id") or "")
             if campaign_id == "" or campaign_id in self.reward_campaign_ids:
-                # This channel-specific query has no earn-mechanism field of
-                # its own to tell a purchase-gated reward campaign apart from
-                # a watch-time drop campaign, and often omits the
-                # personalized claim-state fields that would otherwise reveal
-                # it -- so a campaign already confirmed subscription/gift/
-                # cheer-gated by the account-wide evaluation is excluded here
-                # by ID rather than re-inspected.
+                # A campaign already confirmed subscription/gift/cheer-gated
+                # by the account-wide evaluation is excluded here by ID.
+                continue
+            if (
+                self.__active_incomplete_drop_deadline(
+                    campaign, set(), set(), set(), log_status=False
+                )
+                is None
+            ):
+                # The account-wide evaluation doesn't always see the same
+                # campaign this channel-specific query does (it can rotate
+                # out of the dashboard/reward query independently), so
+                # reward_campaign_ids alone isn't reliable here. Fall back to
+                # asking the same question the eligibility count below asks:
+                # does this campaign currently have any drop that's watchable
+                # (in its date window, requires real minutes watched, not
+                # already claimed)? A purchase-gated campaign's drop reports
+                # zero required minutes and fails this the same way a fully
+                # claimed or not-yet-started campaign would -- in every case,
+                # nothing is gained by anchoring this channel's campaign_ids
+                # to it instead of falling through to the gist/authoritative
+                # fallback below, which may know about a separate, genuinely
+                # incomplete campaign for this same channel.
                 continue
             normalized_campaign = self.__normalize_advertised_campaign(campaign)
             advertised_campaigns.append(normalized_campaign)

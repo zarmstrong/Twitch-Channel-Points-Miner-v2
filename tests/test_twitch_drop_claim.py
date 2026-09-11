@@ -329,6 +329,52 @@ def test_reward_campaign_advertised_by_channel_falls_back_to_gist_drop_campaign(
     assert ("example-game", "drops-channel") not in twitch.category_campaign_eligibility
 
 
+def test_unlisted_reward_campaign_still_falls_back_to_gist_drop_campaign(monkeypatch):
+    # Regression: the account-wide evaluation didn't see this reward campaign
+    # this cycle at all (it can rotate out of Twitch's dashboard/reward query
+    # independently of the per-channel query), so reward_campaign_ids is
+    # empty and can't be used to recognize it by ID. The channel-specific
+    # query still advertises it, with no personalized claim-state fields and
+    # a zero required-minutes drop -- exactly what a purchase-gated campaign
+    # looks like. It must still be filtered out on its own lack of any
+    # currently-watchable drop, so the channel falls through to the gist's
+    # separate, genuinely incomplete campaign instead of getting stuck.
+    twitch = bare_twitch(monkeypatch)
+    reward_campaign = {
+        "id": "reward-campaign-1",
+        "game": {"displayName": "Example Game"},
+        "name": "Sub Badge Launch",
+        "timeBasedDrops": [
+            {
+                "id": "sub-badge-drop",
+                "name": "Sub Badge",
+                "requiredMinutesWatched": 0,
+            }
+        ],
+    }
+    assert twitch.reward_campaign_ids == set()
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[reward_campaign], campaigns_available=True
+        )
+    )
+    twitch.discovered_open_drop_campaigns = []
+    twitch.twitchdrops_app_campaigns = {
+        "example-game": [
+            {
+                "id": "real-drop-campaign-1",
+                "name": "Real Drop Campaign",
+                "channels": ["drops-channel"],
+            }
+        ]
+    }
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "real-drop-campaign-1"
+    ]
+    assert ("example-game", "drops-channel") not in twitch.category_campaign_eligibility
+
+
 def test_channel_not_in_authoritative_campaign_allowlist_still_blocked(monkeypatch):
     # The same authoritative campaign exists, but this channel isn't on its
     # allow-list, so the empty channel query result must still stand.
