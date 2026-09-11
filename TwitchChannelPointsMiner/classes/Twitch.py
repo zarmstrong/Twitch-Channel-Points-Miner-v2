@@ -2647,6 +2647,11 @@ class Twitch(object):
                 return "wildcard campaign drops"
             if getattr(streamer, "from_category", False) is True:
                 return "campaign drops"
+            if (
+                getattr(streamer, "explicitly_configured", False) is not True
+                and getattr(streamer, "from_followers", False) is True
+            ):
+                return "followed channel"
             return "streamer"
 
         points_streams = [
