@@ -112,6 +112,7 @@ class Twitch(object):
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
         "campaign_game_slugs",
+        "reward_campaign_ids",
         "available_badge_names",
         "drop_badge_rewards",
         "restart_requested",
@@ -182,6 +183,13 @@ class Twitch(object):
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
         self.campaign_game_slugs = {}
+        # Campaign IDs confirmed to require a subscription/gift/cheer rather
+        # than watch time. Populated from the account-wide campaign
+        # evaluation and consulted by per-channel discovery too, since that
+        # channel-specific query doesn't carry the same earn-mechanism field
+        # and would otherwise treat a purchase-gated campaign as watchable
+        # whenever it lacks personalized claim-state data.
+        self.reward_campaign_ids = set()
         self.available_badge_names = None
         self.drop_badge_rewards = []
         self.restart_requested = Event()
@@ -1628,6 +1636,12 @@ class Twitch(object):
             if not isinstance(campaign, dict):
                 continue
             is_reward_campaign = campaign.get("_is_reward_campaign") is True
+            if is_reward_campaign is True:
+                # Record this globally (independent of completion/category
+                # match below) so per-channel discovery -- which has no
+                # earn-mechanism field of its own -- can also recognize and
+                # exclude it.
+                self.reward_campaign_ids.add(campaign_id)
             game = campaign.get("game") or {}
             game_name = (game.get("displayName") or game.get("name") or "").strip()
             game_slug = self.__slugify(game_name) if game_name else ""
@@ -4164,7 +4178,14 @@ class Twitch(object):
             ):
                 continue
             campaign_id = str(campaign.get("id") or "")
-            if campaign_id == "":
+            if campaign_id == "" or campaign_id in self.reward_campaign_ids:
+                # This channel-specific query has no earn-mechanism field of
+                # its own to tell a purchase-gated reward campaign apart from
+                # a watch-time drop campaign, and often omits the
+                # personalized claim-state fields that would otherwise reveal
+                # it -- so a campaign already confirmed subscription/gift/
+                # cheer-gated by the account-wide evaluation is excluded here
+                # by ID rather than re-inspected.
                 continue
             normalized_campaign = self.__normalize_advertised_campaign(campaign)
             advertised_campaigns.append(normalized_campaign)

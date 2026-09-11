@@ -32,6 +32,7 @@ def bare_twitch(monkeypatch, claim_status="ELIGIBLE_FOR_ALL"):
     twitch = object.__new__(Twitch)
     twitch.completed_drop_campaigns = set()
     twitch.campaign_game_slugs = {}
+    twitch.reward_campaign_ids = set()
     twitch.log_drop_checks = False
     twitch.category_log_level = logging.INFO
     twitch.category_campaign_eligibility = {}
@@ -275,6 +276,57 @@ def test_channel_allowlisted_in_authoritative_campaign_survives_empty_channel_qu
         1,
         1,
     )
+
+
+def test_reward_campaign_advertised_by_channel_falls_back_to_gist_drop_campaign(
+    monkeypatch,
+):
+    # Regression: Twitch's per-channel "available drops" query advertised a
+    # purchase-gated Reward Campaign for this channel (already confirmed
+    # subscription/gift-gated by the account-wide evaluation, and recorded in
+    # reward_campaign_ids) instead of the real, gist-known watch-time drop
+    # campaign for the same game. The reward campaign must be filtered out of
+    # the channel's advertised campaigns entirely -- not merely excluded from
+    # the eligible count -- so the channel falls through to the gist
+    # channel-allowlist fallback and resolves the real campaign, rather than
+    # getting stuck with a conclusive (0, N) eligibility that would block
+    # that fallback from ever running.
+    twitch = bare_twitch(monkeypatch)
+    reward_campaign = {
+        "id": "reward-campaign-1",
+        "game": {"displayName": "Example Game"},
+        "name": "Sub Badge Launch",
+        "timeBasedDrops": [
+            {
+                "id": "sub-badge-drop",
+                "name": "Sub Badge",
+                "requiredMinutesWatched": 0,
+            }
+        ],
+    }
+    twitch.reward_campaign_ids = {"reward-campaign-1"}
+    twitch.gql = SimpleNamespace(
+        get_available_drops=lambda channel_id: SimpleNamespace(
+            campaigns=[reward_campaign], campaigns_available=True
+        )
+    )
+    twitch.discovered_open_drop_campaigns = []
+    twitch.twitchdrops_app_campaigns = {
+        "example-game": [
+            {
+                "id": "real-drop-campaign-1",
+                "name": "Real Drop Campaign",
+                "channels": ["drops-channel"],
+            }
+        ]
+    }
+
+    assert twitch._Twitch__get_campaign_ids_from_streamer(category_streamer()) == [
+        "real-drop-campaign-1"
+    ]
+    # Left unset (not a conclusive (0, N)) so the gist-based fallback in
+    # __category_drops_condition remains free to apply.
+    assert ("example-game", "drops-channel") not in twitch.category_campaign_eligibility
 
 
 def test_channel_not_in_authoritative_campaign_allowlist_still_blocked(monkeypatch):
