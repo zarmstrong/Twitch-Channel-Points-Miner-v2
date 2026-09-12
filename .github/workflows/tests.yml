@@ -59,8 +59,17 @@ jobs:
         flavor: [standard, portable]
 
     steps:
+      # On pull_request events, actions/checkout defaults to github.sha,
+      # which is GitHub's ephemeral merge-preview commit (this branch
+      # merged into the base branch) rather than the branch's own head
+      # commit - baking that transient SHA into commit_hash.txt below would
+      # show a hash that doesn't correspond to any real commit. Pin to the
+      # PR's actual head commit instead (falls back to github.sha for
+      # non-PR triggers, e.g. push to master or workflow_dispatch).
       - name: Checkout source
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
