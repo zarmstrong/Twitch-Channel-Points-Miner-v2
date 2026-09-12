@@ -26,6 +26,25 @@ def _isolate_shell_bypass_token_env(monkeypatch):
     monkeypatch.delenv(windows_launcher.BUILD_COMMIT_ENV_VAR, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_launcher_logger_state():
+    # main() -> _configure_launcher_logging() mutates the module-level
+    # `logger` singleton in place (adds a StreamHandler, sets
+    # propagate=False) and never reverts it, since in the real app that
+    # config is meant to stick for the rest of the process. Left alone
+    # across tests, one earlier test's main() call permanently disables
+    # propagation to the root logger, silently breaking any later test's
+    # caplog assertions.
+    logger = windows_launcher.logger
+    original_propagate = logger.propagate
+    original_handlers = list(logger.handlers)
+    original_level = logger.level
+    yield
+    logger.propagate = original_propagate
+    logger.handlers = original_handlers
+    logger.setLevel(original_level)
+
+
 def _fake_launch_shell_recording(calls, extract=lambda dashboard_info, initial_tab: (
     dashboard_info,
     initial_tab,
