@@ -735,6 +735,15 @@
             }
         });
 
+        // Every poll used to append a brand-new text node with no upper
+        // bound, so an always-on session accumulated the whole run's worth
+        // of DOM text nodes - the process backing this window's WebView2
+        // renderer grew into the gigabytes after several hours even though
+        // the backend ring buffer (ConsoleBuffer) is itself bounded. Keeping
+        // only the tail here bounds the DOM the same way.
+        var consoleText = '';
+        var CONSOLE_DISPLAY_MAX_CHARS = 500000;
+
         function pollConsole() {
             if (!window.pywebview) {
                 setTimeout(pollConsole, 300);
@@ -745,9 +754,11 @@
                     var content = document.getElementById('console-content');
                     // Console output can contain arbitrary text from any log
                     // source (including Twitch), so never treat it as HTML.
-                    result.lines.forEach(function (line) {
-                        content.appendChild(document.createTextNode(line));
-                    });
+                    consoleText += result.lines.join('');
+                    if (consoleText.length > CONSOLE_DISPLAY_MAX_CHARS) {
+                        consoleText = consoleText.slice(consoleText.length - CONSOLE_DISPLAY_MAX_CHARS);
+                    }
+                    content.textContent = consoleText;
                     if (autoscrollCheckbox.checked) {
                         var scrollContainer = document.getElementById('console-scroll');
                         scrollContainer.scrollTop = scrollContainer.scrollHeight;
