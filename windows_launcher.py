@@ -5,6 +5,7 @@
 import ast
 import ctypes  # cross-platform stdlib module; only .windll is Windows-only (guarded below)
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -17,6 +18,8 @@ import urllib.request
 import webbrowser
 from collections import deque
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class _NullStream:
@@ -697,7 +700,7 @@ def _notify_running_instance():
         pass
 
 
-def _start_single_instance_listener(window):
+def _start_single_instance_listener(show):
     """Runs for the app's lifetime: any connection on this loopback port
     means a second launch wants us to come to the foreground (see
     _notify_running_instance, the client side of this).
@@ -706,6 +709,10 @@ def _start_single_instance_listener(window):
     signal - so there's nothing to parse and nothing a local unprivileged
     process could send to make this do anything other than show the
     window it could already show itself via the tray.
+
+    Takes a `show` callable rather than the window directly so the caller
+    can route it through the same quit-in-progress guard as the tray's own
+    Show item - see `_make_close_confirmation_handler`'s `quitting` event.
     """
 
     def _serve():
@@ -722,7 +729,7 @@ def _start_single_instance_listener(window):
             except OSError:
                 return
             conn.close()
-            window.show()
+            show()
 
     threading.Thread(
         target=_serve, name="Single instance listener", daemon=True
@@ -738,13 +745,19 @@ def _build_tray_icon(on_show, on_quit):
     Any failure here (missing dependency, unreadable icon, no tray support
     on this desktop) is the caller's signal to fall back to the older
     confirm-on-close behavior rather than leave the app unclosable.
+
+    "Show" is marked as pystray's `default` menu item - on Windows, that's
+    the item invoked when the tray icon itself is double-clicked, not just
+    a marker for how it's drawn in the menu. Without it, double-clicking
+    the icon does nothing at all: Windows only ever activates the menu's
+    default item, and pystray otherwise leaves no item marked as one.
     """
     import pystray
     from PIL import Image
 
     image = Image.open(bundled_file(os.path.join("assets", _TRAY_ICON_FILE)))
     menu = pystray.Menu(
-        pystray.MenuItem("Show", lambda icon, item: on_show()),
+        pystray.MenuItem("Show", lambda icon, item: on_show(), default=True),
         pystray.MenuItem("Quit", lambda icon, item: on_quit()),
     )
     return pystray.Icon("TwitchChannelPointsMiner", image, "Twitch Channel Points Miner", menu)
@@ -766,6 +779,7 @@ def _make_hide_to_tray_handler(window, tray_icon):
     """
 
     def on_closing():
+        logger.info("Close button pressed: hiding the window to the tray instead of quitting.")
         window.hide()
         try:
             tray_icon.notify(
@@ -1078,7 +1092,7 @@ class _MinerThreadHandle:
         self.miner = miner
 
 
-def _make_close_confirmation_handler(window, miner_thread):
+def _make_close_confirmation_handler(window, miner_thread, quitting=None):
     """Build a `window.events.closing` handler that blocks the close unless
     the user confirms, whenever the miner is still running.
 
@@ -1100,14 +1114,33 @@ def _make_close_confirmation_handler(window, miner_thread):
     nested call; the outer call then resumes and tries to close the
     (already-disposed) form again, which crashes pywebview trying to
     remove the same window uid from its instance table twice.
+
+    `quitting` (a threading.Event) is set for the duration of the dialog
+    and left set once the user confirms - see launch_shell's `_guarded_show`.
+    An unowned MessageBox doesn't just let a second *close* reach the form
+    (the reentrancy above); it also leaves the tray's "Show" item, and the
+    single-instance listener's remote-show signal, free to fire from their
+    own threads while this dialog is up. `window.show()` marshals onto the
+    GUI thread via Control.Invoke, which a nested modal message loop like
+    MessageBox.Show still pumps - so it can run interleaved with this
+    handler tearing the window down, producing the same
+    already-removed-from-pywebview's-instance-table crash as the reentrant
+    case above, just reached via Show instead of a second Close. Cleared
+    again if the user cancels, so Show keeps working normally afterward.
+    Defaults to a fresh, private Event when the caller has no tray (and
+    thus no Show button to race against).
     """
     in_progress = threading.Lock()
+    if quitting is None:
+        quitting = threading.Event()
 
     def on_closing():
         if not miner_thread.is_alive():
             return True
         if not in_progress.acquire(blocking=False):
             return False
+        quitting.set()
+        confirmed = False
         try:
             try:
                 confirmed = window.create_confirmation_dialog(
@@ -1122,6 +1155,8 @@ def _make_close_confirmation_handler(window, miner_thread):
                 _stop_miner_gracefully(miner_thread)
             return confirmed
         finally:
+            if not confirmed:
+                quitting.clear()
             in_progress.release()
 
     return on_closing
@@ -1221,11 +1256,34 @@ def launch_shell(
         # to collect a username (see main()'s start_minimized gating).
         hidden=start_minimized,
     )
-    _start_single_instance_listener(window)
+
+    # Diagnostic-only: some users report the window occasionally not
+    # reappearing as a taskbar button after minimizing it, but nothing in
+    # this file (or pywebview) actually touches taskbar visibility on
+    # minimize/restore - that's left entirely to the OS/WinForms default.
+    # These just record that the events fired at all, so a report can be
+    # correlated against the log: e.g. a "minimized" with no matching
+    # "restored" narrows it to an OS/WebView2-level rendering quirk rather
+    # than this app swallowing the restore.
+    window.events.minimized += lambda: logger.info("Shell window minimized.")
+    window.events.restored += lambda: logger.info("Shell window restored from minimized/maximized.")
+
+    # Set for as long as a close/quit confirmation dialog is up (and left set
+    # once the user confirms) - see _make_close_confirmation_handler's
+    # docstring for the race this closes between that dialog and a
+    # concurrent Show request from the tray icon's own thread or the
+    # single-instance listener's socket thread.
+    quitting = threading.Event()
+
+    def _guarded_show():
+        if not quitting.is_set():
+            window.show()
+
+    _start_single_instance_listener(_guarded_show)
 
     tray_icon = None
     normal_handler = None
-    quit_handler = _make_close_confirmation_handler(window, miner_thread)
+    quit_handler = _make_close_confirmation_handler(window, miner_thread, quitting)
     confirm_from_tray_lock = threading.Lock()
 
     def _confirm_and_quit_from_tray():
@@ -1283,12 +1341,13 @@ def launch_shell(
         window.destroy()
 
     try:
-        tray_icon = _build_tray_icon(window.show, _quit_from_tray)
+        tray_icon = _build_tray_icon(_guarded_show, _quit_from_tray)
     except Exception:
         # No tray support available (dependency missing, no desktop tray,
         # bad icon, ...) - fall back to the older confirm-on-close behavior
         # rather than leave the app with no way to quit at all.
         tray_icon = None
+        logger.exception("System tray icon unavailable; falling back to confirm-on-close.")
 
     api._tray_available = tray_icon is not None
 

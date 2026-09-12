@@ -1,6 +1,7 @@
 import builtins
 import http.server
 import json
+import logging
 import os
 import shutil
 import socket
@@ -1860,6 +1861,8 @@ class _FakeEventSlot:
 class _FakeEvents:
     def __init__(self):
         self.closing = _FakeEventSlot()
+        self.minimized = _FakeEventSlot()
+        self.restored = _FakeEventSlot()
 
 
 class _FakeWindow:
@@ -2441,6 +2444,86 @@ def test_launch_shell_wires_hide_to_tray_when_tray_is_available(tmp_path, monkey
     assert getattr(window, "hidden", False) is True
 
 
+def test_launch_shell_logs_minimize_and_restore_events(tmp_path, monkeypatch, caplog):
+    # Diagnostic logging for reports of the window not reappearing in the
+    # taskbar after being minimized - see the comment above where these are
+    # wired up in launch_shell. Not app logic, just visibility into whether
+    # the OS-level events even fired.
+    fake_webview = _FakeWebview()
+    _patch_fake_webview(monkeypatch, fake_webview)
+    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+
+    with caplog.at_level(logging.INFO, logger="windows_launcher"):
+        windows_launcher.launch_shell(
+            None,
+            windows_launcher.ConsoleBuffer(),
+            None,
+            _FakeMinerThread(alive=False),
+            tmp_path / "config.py",
+            tmp_path / ".shell_analytics_prompt_shown",
+            False,
+            lambda: None,
+            None,
+        )
+        fake_webview.window.events.minimized.set()
+        fake_webview.window.events.restored.set()
+
+    assert "minimized" in caplog.text.lower()
+    assert "restored" in caplog.text.lower()
+
+
+def test_launch_shell_logs_when_close_button_hides_to_tray(tmp_path, monkeypatch, caplog):
+    fake_webview = _FakeWebview()
+    _patch_fake_webview(monkeypatch, fake_webview)
+    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+    fake_icon = _FakeTrayIcon()
+    monkeypatch.setattr(
+        windows_launcher, "_build_tray_icon", lambda on_show, on_quit: fake_icon
+    )
+
+    with caplog.at_level(logging.INFO, logger="windows_launcher"):
+        windows_launcher.launch_shell(
+            None,
+            windows_launcher.ConsoleBuffer(),
+            None,
+            _FakeMinerThread(alive=True),
+            tmp_path / "config.py",
+            tmp_path / ".shell_analytics_prompt_shown",
+            False,
+            lambda: None,
+            None,
+        )
+        fake_webview.window.events.closing.handler()
+
+    assert "hiding the window to the tray" in caplog.text.lower()
+
+
+def test_launch_shell_logs_when_tray_is_unavailable(tmp_path, monkeypatch, caplog):
+    fake_webview = _FakeWebview()
+    _patch_fake_webview(monkeypatch, fake_webview)
+    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+
+    def _raise(on_show, on_quit):
+        raise RuntimeError("no tray on this desktop")
+
+    monkeypatch.setattr(windows_launcher, "_build_tray_icon", _raise)
+
+    with caplog.at_level(logging.INFO, logger="windows_launcher"):
+        windows_launcher.launch_shell(
+            None,
+            windows_launcher.ConsoleBuffer(),
+            None,
+            _FakeMinerThread(alive=False),
+            tmp_path / "config.py",
+            tmp_path / ".shell_analytics_prompt_shown",
+            False,
+            lambda: None,
+            None,
+        )
+
+    assert "system tray icon unavailable" in caplog.text.lower()
+
+
 def _launch_shell_with_tray(tmp_path, monkeypatch, miner_alive=True):
     fake_webview = _FakeWebview()
     _patch_fake_webview(monkeypatch, fake_webview)
@@ -2549,6 +2632,47 @@ def test_launch_shell_quit_from_tray_cancelled_restores_hide_to_tray(tmp_path, m
     assert window.hidden is True
 
 
+def test_launch_shell_tray_show_is_ignored_while_quit_confirmation_is_open(
+    tmp_path, monkeypatch
+):
+    """Regression test for a real crash: pystray's Show item calls
+    window.show(), which marshals onto the GUI thread via Control.Invoke -
+    a call a nested modal message loop (like WinForms' MessageBox.Show,
+    used for the "Stop mining?" confirmation) still pumps, since an
+    unowned MessageBox doesn't stop other threads' marshaled calls from
+    reaching the form. A Show landing while the window is mid-teardown
+    crashed pywebview (KeyError on its window-instance table - the same
+    shape of bug as the reentrant-close case above, just reached via Show
+    instead of a second Close). The `on_show` passed to the tray icon must
+    ignore Show while a quit is in progress - see
+    _make_close_confirmation_handler's docstring on `quitting`."""
+    window, captured, tray_icon, miner = _launch_shell_with_tray(tmp_path, monkeypatch)
+    window.hidden = True
+
+    def fake_dialog(title, message):
+        captured["on_show"]()  # A concurrent tray "Show" click, simulated.
+        return True
+
+    window.create_confirmation_dialog = fake_dialog
+
+    captured["on_quit"]()
+
+    assert window.hidden is True  # Show never actually ran.
+    assert window.destroyed is True
+    assert tray_icon.stopped is True
+
+
+def test_launch_shell_tray_show_works_again_after_quit_is_cancelled(tmp_path, monkeypatch):
+    window, captured, tray_icon, miner = _launch_shell_with_tray(tmp_path, monkeypatch)
+    window.hidden = True
+    window.create_confirmation_dialog = lambda title, message: False  # User clicks Cancel.
+
+    captured["on_quit"]()
+    captured["on_show"]()
+
+    assert window.hidden is False
+
+
 def test_build_tray_icon_uses_bundled_icon_file(monkeypatch):
     opened = {}
 
@@ -2559,9 +2683,10 @@ def test_build_tray_icon_uses_bundled_icon_file(monkeypatch):
             return "the-image"
 
     class FakeMenuItem:
-        def __init__(self, text, action):
+        def __init__(self, text, action, default=False):
             self.text = text
             self.action = action
+            self.default = default
 
     class FakeMenu:
         def __init__(self, *items):
@@ -2588,6 +2713,10 @@ def test_build_tray_icon_uses_bundled_icon_file(monkeypatch):
     assert icon.image == "the-image"
     assert str(opened["path"]).endswith(windows_launcher._TRAY_ICON_FILE)
     assert [item.text for item in icon.menu.items] == ["Show", "Quit"]
+    # "Show" must be pystray's default item - on Windows that's what makes
+    # double-clicking the tray icon itself (not just opening its menu) show
+    # the window; otherwise a double-click does nothing.
+    assert [item.default for item in icon.menu.items] == [True, False]
 
 
 # --- Single instance --------------------------------------------------
@@ -2683,7 +2812,7 @@ def test_single_instance_listener_shows_window_when_pinged(monkeypatch):
             self.shown.set()
 
     window = FakeWindow()
-    windows_launcher._start_single_instance_listener(window)
+    windows_launcher._start_single_instance_listener(window.show)
 
     # The listener's background thread may not have bound/started
     # listening yet by the time this runs - retry the ping instead of
