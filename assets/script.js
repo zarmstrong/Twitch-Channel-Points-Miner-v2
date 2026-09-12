@@ -810,7 +810,10 @@ function renderNowWatching(entries) {
             link.on('click', function (e) {
                 e.preventDefault();
                 switchDashboardTab('drops');
-                changeDropCategory(entry.game);
+                var matchedCategory = findDropCategoryForNowWatching(entry);
+                if (matchedCategory) {
+                    changeDropCategory(matchedCategory);
+                }
             });
             line.append(link);
         } else if (entry.reason === 'drops' || entry.reason === 'badge') {
@@ -1077,6 +1080,36 @@ function normalizeDropsData(response) {
         categories: grouped,
         orderedCategories: orderedCategories
     };
+}
+
+function findDropCategoryForNowWatching(entry) {
+    if (!entry) return null;
+    var visibleCategories = getVisibleDropCategories();
+
+    // "Currently watching" reports the live stream's game (stream.game), while
+    // drop categories are keyed by the drop campaign's game (campaign.game).
+    // These are usually the same string, but come from two different Twitch
+    // API objects fetched at different times, so they can diverge (most
+    // commonly for wildcard/badge-sourced watches) - an exact match is tried
+    // first, then a case-insensitive one, before falling back to matching by
+    // streamer, which is reliable regardless of which "game" string diverged.
+    if (entry.game) {
+        if (visibleCategories.indexOf(entry.game) !== -1) {
+            return entry.game;
+        }
+        var lowerGame = entry.game.toLowerCase();
+        var caseInsensitiveMatch = visibleCategories.find((category) => category.toLowerCase() === lowerGame);
+        if (caseInsensitiveMatch) return caseInsensitiveMatch;
+    }
+
+    if (entry.username) {
+        var byStreamer = visibleCategories.find((category) => {
+            return (dropsState.categories[category] || []).some((drop) => drop.streamer === entry.username);
+        });
+        if (byStreamer) return byStreamer;
+    }
+
+    return null;
 }
 
 function changeDropCategory(category) {
