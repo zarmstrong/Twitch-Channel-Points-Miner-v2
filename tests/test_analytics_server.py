@@ -716,11 +716,27 @@ def test_now_watching_widget_jumps_to_drops_tab_on_click():
     )[0]
 
     assert "switchDashboardTab('drops');" in render_now_watching
-    assert "changeDropCategory(entry.game);" in render_now_watching
+    # The now-watching game (from the live stream) and drop categories (keyed
+    # by the drop campaign's game) can diverge, so the click resolves the
+    # actual category via findDropCategoryForNowWatching(...) rather than
+    # trusting entry.game directly.
+    assert "findDropCategoryForNowWatching(entry)" in render_now_watching
+    assert "if (matchedCategory) {" in render_now_watching
+    assert "changeDropCategory(matchedCategory);" in render_now_watching
     # A drops/badge entry with no known game (entry.game is null) must not
     # be wired to changeDropCategory(null), which would corrupt the saved
     # Drops-tab category selection.
     assert "&& entry.game)" in render_now_watching
+
+    assert "function findDropCategoryForNowWatching(entry)" in script
+    resolver = script.split("function findDropCategoryForNowWatching", 1)[1].split(
+        "function changeDropCategory", 1
+    )[0]
+    # Falls back to matching by streamer when the game strings don't line up,
+    # since drop records carry a reliable streamer field regardless of which
+    # "game" string diverged.
+    assert "drop.streamer === entry.username" in resolver
+    assert "return null;" in resolver
 
 
 def test_points_chart_translates_logger_month_token_for_apexcharts():
