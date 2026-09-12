@@ -1814,6 +1814,59 @@ def test_close_confirmation_does_not_stop_the_miner_when_cancelled():
     assert miner.calls == []
 
 
+def test_close_confirmation_notifies_shutting_down_via_tray_when_confirmed():
+    handle = windows_launcher._MinerThreadHandle()
+    handle.thread = _FakeMinerThread(alive=True)
+    handle.set_miner(_FakeMiner())
+    tray_icon = _FakeTrayIcon()
+
+    handler = windows_launcher._make_close_confirmation_handler(
+        _FakeWindowConfirms(), handle, tray_icon=tray_icon
+    )
+
+    assert handler() is True
+    assert len(tray_icon.notifications) == 1
+    message, title = tray_icon.notifications[0]
+    assert title == "Twitch Channel Points Miner"
+    assert "shutting down" in message.lower()
+
+
+def test_close_confirmation_does_not_notify_when_cancelled():
+    class FakeWindow:
+        def create_confirmation_dialog(self, title, message):
+            return False
+
+    handle = windows_launcher._MinerThreadHandle()
+    handle.thread = _FakeMinerThread(alive=True)
+    handle.set_miner(_FakeMiner())
+    tray_icon = _FakeTrayIcon()
+
+    handler = windows_launcher._make_close_confirmation_handler(
+        FakeWindow(), handle, tray_icon=tray_icon
+    )
+
+    assert handler() is False
+    assert tray_icon.notifications == []
+
+
+def test_close_confirmation_survives_a_shutdown_notify_failure():
+    handle = windows_launcher._MinerThreadHandle()
+    handle.thread = _FakeMinerThread(alive=True)
+    miner = _FakeMiner()
+    handle.set_miner(miner)
+
+    class BrokenTrayIcon:
+        def notify(self, message, title=None):
+            raise RuntimeError("notifications unsupported on this backend")
+
+    handler = windows_launcher._make_close_confirmation_handler(
+        _FakeWindowConfirms(), handle, tray_icon=BrokenTrayIcon()
+    )
+
+    assert handler() is True
+    assert miner.calls == [(None, None)]
+
+
 def test_stop_miner_gracefully_does_nothing_without_a_registered_miner():
     handle = windows_launcher._MinerThreadHandle()
 
@@ -2602,6 +2655,24 @@ def test_launch_shell_quit_from_tray_stops_miner_and_destroys_window(tmp_path, m
     assert miner.calls == [(None, None)]
     assert window.destroyed is True
     assert tray_icon.stopped is True
+
+
+def test_launch_shell_quit_from_tray_shows_shutting_down_notification(tmp_path, monkeypatch):
+    """The tray-Quit path is where users actually experience the multi-
+    minute graceful shutdown (IRC leave, websocket teardown, watcher joins)
+    freezing the window - see _stop_miner_gracefully's docstring. A tray
+    notification fired before that blocking work starts is the only
+    feedback the user gets that it's still working rather than stuck."""
+    window, captured, tray_icon, miner = _launch_shell_with_tray(tmp_path, monkeypatch)
+    window.create_confirmation_dialog = lambda title, message: True
+
+    captured["on_quit"]()
+
+    assert miner.calls == [(None, None)]
+    assert len(tray_icon.notifications) == 1
+    message, title = tray_icon.notifications[0]
+    assert title == "Twitch Channel Points Miner"
+    assert "shutting down" in message.lower()
 
 
 def test_launch_shell_quit_from_tray_reentrant_close_is_cancelled(tmp_path, monkeypatch):

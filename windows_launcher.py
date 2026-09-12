@@ -1122,9 +1122,19 @@ class _MinerThreadHandle:
         self.miner = miner
 
 
-def _make_close_confirmation_handler(window, miner_thread, quitting=None):
+def _make_close_confirmation_handler(window, miner_thread, quitting=None, tray_icon=None):
     """Build a `window.events.closing` handler that blocks the close unless
     the user confirms, whenever the miner is still running.
+
+    `tray_icon`, when given, fires a "shutting down" balloon/toast the
+    moment the user confirms - `_stop_miner_gracefully` below runs
+    synchronously on this same (GUI) thread and can legitimately take up to
+    a few minutes (IRC leave, websocket teardown, several 30-60s watcher
+    joins), during which the window itself is unresponsive and looks hung.
+    The notification is rendered by the shell (explorer.exe), not this
+    process, so it stays visible through that blocked stretch. Best-effort,
+    matching this file's other tray_icon.notify use in
+    _make_hide_to_tray_handler: never worth failing the quit over.
 
     Before this shell existed, stopping the miner required an explicit
     Ctrl+C; a bare click on the window's close button must not silently end
@@ -1182,6 +1192,15 @@ def _make_close_confirmation_handler(window, miner_thread, quitting=None):
                 # silently stopping an unattended miner.
                 return False
             if confirmed:
+                if tray_icon is not None:
+                    try:
+                        tray_icon.notify(
+                            "Shutting down - leaving chat, closing connections, and "
+                            "saving data. This can take a moment.",
+                            "Twitch Channel Points Miner",
+                        )
+                    except Exception:
+                        pass
                 _stop_miner_gracefully(miner_thread)
             return confirmed
         finally:
@@ -1328,7 +1347,7 @@ def launch_shell(
 
     tray_icon = None
     normal_handler = None
-    quit_handler = _make_close_confirmation_handler(window, miner_thread, quitting)
+    quit_handler = None
     confirm_from_tray_lock = threading.Lock()
 
     def _confirm_and_quit_from_tray():
@@ -1393,6 +1412,8 @@ def launch_shell(
         # rather than leave the app with no way to quit at all.
         tray_icon = None
         logger.exception("System tray icon unavailable; falling back to confirm-on-close.")
+
+    quit_handler = _make_close_confirmation_handler(window, miner_thread, quitting, tray_icon)
 
     api._tray_available = tray_icon is not None
 
