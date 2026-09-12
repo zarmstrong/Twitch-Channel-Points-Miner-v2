@@ -2673,6 +2673,52 @@ def test_launch_shell_tray_show_works_again_after_quit_is_cancelled(tmp_path, mo
     assert window.hidden is False
 
 
+def test_launch_shell_wires_guarded_show_into_single_instance_listener(tmp_path, monkeypatch):
+    """Regression test for a coverage gap: launch_shell must hand
+    _start_single_instance_listener the same quitting-guarded show as the
+    tray's on_show, not a raw window.show - otherwise a second-launch ping
+    landing during a quit confirmation dialog reintroduces, for that call
+    site, the exact race _guarded_show exists to close. The tray path has
+    test_launch_shell_tray_show_is_ignored_while_quit_confirmation_is_open;
+    nothing previously exercised this one, so a future accidental revert to
+    _start_single_instance_listener(window.show) would pass the whole suite."""
+    fake_webview = _FakeWebview()
+    _patch_fake_webview(monkeypatch, fake_webview)
+    monkeypatch.setattr(windows_launcher, "_maybe_prompt_to_enable_analytics", lambda *a: None)
+
+    captured = {}
+    monkeypatch.setattr(
+        windows_launcher,
+        "_start_single_instance_listener",
+        lambda show: captured.__setitem__("show", show),
+    )
+
+    handle = windows_launcher._MinerThreadHandle()
+    handle.thread = _FakeMinerThread(alive=True)
+    handle.set_miner(_FakeMiner())
+
+    windows_launcher.launch_shell(
+        None,
+        windows_launcher.ConsoleBuffer(),
+        None,
+        handle,
+        tmp_path / "config.py",
+        tmp_path / ".shell_analytics_prompt_shown",
+        False,
+        lambda: None,
+        None,
+    )
+
+    window = fake_webview.window
+    window.create_confirmation_dialog = lambda title, message: True  # Confirms quit.
+    window.hidden = True
+
+    window.events.closing.set()  # The window's own [X], confirmed closed.
+    captured["show"]()  # A second-instance ping arriving right after.
+
+    assert window.hidden is True  # Ignored - not the raw, unguarded window.show.
+
+
 def test_build_tray_icon_uses_bundled_icon_file(monkeypatch):
     opened = {}
 

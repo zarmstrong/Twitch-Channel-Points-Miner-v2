@@ -533,6 +533,36 @@ def install_console_capture(buffer):
     sys.stderr = _TeeStream(buffer, sys.stderr)
 
 
+def _configure_launcher_logging():
+    """Make this module's own `logger.info(...)` calls (the shell-lifecycle
+    diagnostics in launch_shell/_make_hide_to_tray_handler) actually show up
+    in the Console tab from the moment the window exists.
+
+    Without this, `logger` has no handler and sits at the logging module's
+    default WARNING level until - if ever - the miner thread reaches
+    TwitchChannelPointsMiner.__init__ and calls configure_loggers(), which
+    only happens once mining actually starts. That's arbitrarily late (never,
+    on first run, until a username is submitted; otherwise racing window
+    creation) - exactly when a user is most likely to be poking at
+    minimize/restore/close, so those log lines would otherwise be silently
+    dropped rather than merely delayed.
+
+    Attaches directly to this module's own logger (not the root logger) and
+    disables propagation, so this stays independent of - and never
+    double-prints alongside - the miner's own, separately-configured
+    category/emoji-aware console formatting once configure_loggers() does
+    eventually run.
+
+    Called after install_console_capture() so `sys.stdout` here is already
+    the Console-tab tee.
+    """
+    logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(handler)
+    logger.propagate = False
+
+
 def _wait_until_dashboard_ready(url, timeout=10.0, interval=0.2):
     """Give the analytics server, started on a background thread, a moment
     to bind its port before the shell tries to load it - and confirm it's
@@ -1276,8 +1306,23 @@ def launch_shell(
     quitting = threading.Event()
 
     def _guarded_show():
-        if not quitting.is_set():
+        if quitting.is_set():
+            return
+        try:
             window.show()
+        except Exception:
+            # Best-effort, matching _message_box/tray_icon.notify elsewhere
+            # in this file: the is_set() check above and the underlying
+            # pywebview call it guards aren't atomic with on_closing setting
+            # `quitting` - a Show can still be in flight (already past the
+            # check, already marshaled onto the GUI thread via
+            # Control.Invoke) at the exact moment the window gets torn down.
+            # Swallowing here keeps that vanishingly rare, already-late Show
+            # from raising back into a caller that must not die over it: the
+            # tray icon's own callback thread, or _start_single_instance_listener's
+            # daemon thread, which would otherwise silently and permanently
+            # stop responding to second-launch pings for the rest of this run.
+            pass
 
     _start_single_instance_listener(_guarded_show)
 
@@ -1433,6 +1478,7 @@ def main():
 
     console_buffer = ConsoleBuffer()
     install_console_capture(console_buffer)
+    _configure_launcher_logging()
 
     commit_hash = _build_commit_hash()
     if commit_hash:
