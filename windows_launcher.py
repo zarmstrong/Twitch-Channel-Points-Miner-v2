@@ -1276,6 +1276,19 @@ def launch_shell(
     """
     import webview
 
+    # pywebview's own logger already has a StreamHandler attached (added at
+    # import time in webview/__init__.py) writing to whatever sys.stderr was
+    # at that point - which, since install_console_capture() already ran by
+    # now, is the Console tab's tee. It defaults to INFO, which swallows the
+    # one debug line that says which native renderer got picked (CEF /
+    # WebView2 "edgechromium" / legacy "mshtml" - see webview/platforms/
+    # winforms.py) and any other library-internal debug detail. That
+    # renderer choice is exactly the kind of thing that could make the
+    # minimize/restore diagnostics below behave differently across machines,
+    # so surface it rather than leaving it hidden.
+    logging.getLogger("pywebview").setLevel(logging.DEBUG)
+    logger.info("Shell using pywebview %s.", getattr(webview, "__version__", "unknown"))
+
     api = WindowApi(
         console_buffer,
         dashboard_info,
@@ -1314,8 +1327,27 @@ def launch_shell(
     # correlated against the log: e.g. a "minimized" with no matching
     # "restored" narrows it to an OS/WebView2-level rendering quirk rather
     # than this app swallowing the restore.
-    window.events.minimized += lambda: logger.info("Shell window minimized.")
-    window.events.restored += lambda: logger.info("Shell window restored from minimized/maximized.")
+    #
+    # Reports have also come in of the minimize click producing *no* log
+    # line at all, which the two one-line lambdas this used to be couldn't
+    # help diagnose any further - there was nothing to distinguish "the
+    # handler never ran" from "it ran and logger.info() itself failed". Named
+    # handlers wrapped in try/except close that gap: pywebview's Event.set()
+    # already catches handler exceptions (logging them to its own
+    # 'pywebview' logger, now surfaced above), but that would only prove a
+    # handler ran and blew up, not that Resize/on_resize fired at all.
+    def _log_window_event(name):
+        def _handler(*args, **kwargs):
+            try:
+                logger.info("Shell window event fired: %s (args=%r, kwargs=%r)", name, args, kwargs)
+            except Exception:
+                logger.exception("Failed to log shell window event: %s", name)
+
+        return _handler
+
+    window.events.minimized += _log_window_event("minimized")
+    window.events.restored += _log_window_event("restored")
+    logger.info("Registered minimize/restore diagnostics for the shell window.")
 
     # Set for as long as a close/quit confirmation dialog is up (and left set
     # once the user confirms) - see _make_close_confirmation_handler's
@@ -1431,6 +1463,15 @@ def launch_shell(
         # Dialogs (unlike event handlers) require the GUI loop that
         # webview.start() begins - pywebview's own examples run them via
         # this callback, not before start() is called.
+        #
+        # webview.guilib is only populated once webview.start() actually
+        # picks a backend, hence logging the renderer here rather than
+        # alongside the minimize/restore diagnostics above, which are
+        # registered before start() runs.
+        logger.info(
+            "Shell GUI loop started (renderer=%s).",
+            getattr(getattr(webview, "guilib", None), "renderer", "unknown"),
+        )
         if not needs_username:
             # Asking about the dashboard before the user has even entered a
             # username would be premature - it can still appear on a later,
