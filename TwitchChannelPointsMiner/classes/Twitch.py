@@ -2414,9 +2414,17 @@ class Twitch(object):
             twitch_category_slugs,
         ) = self.__active_drop_category_slugs_from_campaigns(inventory, None)
         twitch_candidate_count = len(active_category_deadlines)
+        twitch_evaluated_category_slugs = twitch_category_slugs.copy()
         if refresh_external_catalog or not getattr(
             self, "twitchdrops_app_catalog_complete", False
         ):
+            # __twitchdrops_app_fallback mutates twitch_category_slugs in place
+            # (it records every front-page match, not just Twitch-authoritative
+            # ones), so external_additions below must be filtered against the
+            # snapshot taken before this call -- otherwise every external
+            # candidate the fallback just found would also appear to already be
+            # "Twitch category slugs" and get excluded, silently zeroing out
+            # wildcard's external additions every cycle.
             fallback_deadlines = self.__twitchdrops_app_fallback(
                 None, twitch_category_slugs
             )
@@ -2425,7 +2433,7 @@ class Twitch(object):
         external_additions = {
             game_slug: deadline
             for game_slug, deadline in fallback_deadlines.items()
-            if game_slug not in twitch_category_slugs
+            if game_slug not in twitch_evaluated_category_slugs
         }
         active_category_deadlines.update(external_additions)
         # Replace, not merge: this call always evaluates every open campaign

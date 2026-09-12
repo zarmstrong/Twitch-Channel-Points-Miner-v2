@@ -266,6 +266,38 @@ def test_wildcard_does_not_override_twitch_authoritative_deadline(monkeypatch):
     )
 
 
+def test_wildcard_external_addition_survives_fallback_mutating_known_slugs(
+    monkeypatch,
+):
+    # Regression test: the real __twitchdrops_app_fallback records every
+    # front-page match (not just Twitch-authoritative ones) by mutating the
+    # `known_category_slugs` set it's given, in place -- it does this for its
+    # own internal "skip if already Twitch-authoritative" bookkeeping. The
+    # wildcard pass must diff fallback_deadlines against a snapshot taken
+    # *before* that call, not the (now mutated) live set, or every external
+    # addition the fallback just found would appear to already be a "Twitch"
+    # slug and get silently dropped -- exactly what happened in production
+    # (see the coffeedicee bug report: "0 external additions" forever, even
+    # with dozens of genuinely open external campaigns logged moments
+    # earlier).
+    twitch = _bare_twitch(
+        monkeypatch, {"dead-by-daylight": datetime(2099, 1, 1)}
+    )
+    twitch.twitchdrops_app_catalog_complete = False
+
+    def mutating_fallback(self, categories, known_slugs):
+        known_slugs.add("urgent-external-game")
+        return {"urgent-external-game": datetime(2050, 1, 1)}
+
+    monkeypatch.setattr(
+        Twitch, "_Twitch__twitchdrops_app_fallback", mutating_fallback
+    )
+
+    result = twitch.get_wildcard_categories_with_active_drops()
+
+    assert result == ["urgent-external-game", "dead-by-daylight"]
+
+
 def test_wildcard_reuses_preloaded_external_catalog(monkeypatch):
     twitch = _bare_twitch(
         monkeypatch, {"dead-by-daylight": datetime(2099, 1, 1)}
