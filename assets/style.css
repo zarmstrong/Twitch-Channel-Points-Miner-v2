@@ -157,8 +157,13 @@ a {
 #log-content {
     text-align: left;
     white-space: pre-wrap;
-    max-height: 400px;
+    max-height: 65vh;
     padding: 0;
+}
+
+.logs-toolbar {
+    text-align: left;
+    margin-bottom: 4px;
 }
 
 #auto-update-log {
@@ -507,6 +512,22 @@ body.header-hidden .top-controls-row {
     justify-self: start;
 }
 
+/* Chromium doesn't propagate the inherited box-sizing: border-box down to
+   the non-<summary> content of an open <details> (it's wrapped in an
+   internal box of its own), so form controls in here fall back to
+   content-box and overflow their grid cell once width: 100% is added on
+   top of their padding/border. Set it explicitly instead of inheriting. */
+.config-item * {
+    box-sizing: border-box;
+}
+
+.config-settings-grid .select,
+.config-settings-grid select {
+    min-width: 0;
+    max-width: 100%;
+    width: 100%;
+}
+
 .config-checkbox {
     align-self: center;
     padding: 8px 0;
@@ -589,6 +610,27 @@ body.header-hidden .top-controls-row {
 .notification-fields .input {
     width: 100%;
     box-sizing: border-box;
+}
+
+/* The native calendar-picker icon inside #startDate/#endDate is sized and
+   placed by the rendering engine's own internals, not by this CSS - in the
+   Windows desktop shell's embedded WebView2 (a different Chromium build
+   than a regular browser) it renders slightly outside the input's border
+   instead of centered within it. Pinning it to an absolute position inside
+   the (now explicitly positioned) input, rather than trusting native flow,
+   keeps it inside the box regardless of that host's own icon sizing. */
+input[type="date"].input {
+    position: relative;
+    box-sizing: border-box;
+    padding-right: 2em;
+}
+
+input[type="date"].input::-webkit-calendar-picker-indicator {
+    position: absolute;
+    right: 0.6em;
+    top: 50%;
+    transform: translateY(-50%);
+    margin: 0;
 }
 
 .notification-config summary .tag {

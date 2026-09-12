@@ -222,7 +222,7 @@ ANALYTICS_CONFIG = None
 
 # ANALYTICS_CONFIG = {
 #     'host': "127.0.0.1",                     # Use 0.0.0.0 only on a trusted network and set a strong password
-#     'port': 5000,
+#     'port': 54455,
 #     'refresh': 5,                             # Chart refresh interval in minutes
 #     'days_ago': 7,                            # Initial chart history range
 #     'password': None,                         # Required when binding to a non-loopback host

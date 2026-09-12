@@ -21,8 +21,83 @@
 
     <link id="dark-theme" href="{{url_for('static', filename='dark-theme.css', v=assetVersion)}}" rel="stylesheet" />
     <script>
-        if (localStorage.getItem('dark-mode') === 'false') {
+        // Server-persisted fallback for dark mode/annotations/etc. when this
+        // page's own localStorage is blocked (see safeStorage below).
+        // Defined before safeStorage so its in-memory fallback can seed
+        // itself synchronously from this - no async round-trip, and so no
+        // flash of default settings before the real ones apply.
+        var serverDashboardPrefs = {{ dashboardPrefs | tojson }};
+
+        // Wrapped so a blocked/restricted localStorage (e.g. third-party
+        // storage restrictions inside the Windows desktop shell's embedded
+        // iframe, whose top-level document is a different origin than this
+        // page) can't throw and silently abort every later script on the
+        // page - it falls back to a store backed by serverDashboardPrefs
+        // instead, so preferences still survive a reload in that context
+        // (persisted server-side - see /dashboard_prefs - rather than
+        // browser storage) instead of just breaking the whole dashboard.
+        // Defined here, before script.js, so both can share it.
+        var safeStorage = (function () {
+            try {
+                var testKey = '__tcpm_storage_test__';
+                window.localStorage.setItem(testKey, '1');
+                window.localStorage.removeItem(testKey);
+                return window.localStorage;
+            } catch (error) {
+                var memory = {};
+                if (serverDashboardPrefs && typeof serverDashboardPrefs === 'object') {
+                    Object.keys(serverDashboardPrefs).forEach(function (key) {
+                        memory[key] = serverDashboardPrefs[key];
+                    });
+                }
+                function persist(key, value) {
+                    // Best-effort, fire-and-forget - a failed save here just
+                    // means this one change doesn't survive a restart, not
+                    // worth surfacing to the user over.
+                    if (typeof $ === 'undefined') return;
+                    $.ajax({
+                        url: 'dashboard_prefs',
+                        method: 'POST',
+                        contentType: 'application/json',
+                        data: JSON.stringify({ key: key, value: value }),
+                    });
+                }
+                return {
+                    getItem: function (key) {
+                        return Object.prototype.hasOwnProperty.call(memory, key) ? memory[key] : null;
+                    },
+                    setItem: function (key, value) {
+                        value = String(value);
+                        memory[key] = value;
+                        persist(key, value);
+                    },
+                    removeItem: function (key) {
+                        delete memory[key];
+                        persist(key, null);
+                    },
+                };
+            }
+        })();
+
+        if (safeStorage.getItem('dark-mode') === 'false') {
             document.getElementById('dark-theme').disabled = true;
+        }
+
+        // The shell bypass cookie set after the first request doesn't
+        // reliably survive for later same-origin requests made from inside
+        // the Windows desktop shell's embedded iframe (the same class of
+        // third-party-context restriction as safeStorage above), so every
+        // request 401s once the cookie is relied upon alone. Instead, reuse
+        // the shell_token the parent shell already put on this frame's own
+        // URL and re-attach it to every AJAX call this page makes - a real
+        // browser tab has no such token in its URL, so this is a no-op there
+        // and cookie-based Basic Auth keeps working as before.
+        var shellBypassToken = new URLSearchParams(window.location.search).get('shell_token');
+        if (shellBypassToken) {
+            $.ajaxPrefilter(function (options) {
+                options.url += (options.url.indexOf('?') === -1 ? '?' : '&') +
+                    'shell_token=' + encodeURIComponent(shellBypassToken);
+            });
         }
     </script>
     <link href="{{url_for('static', filename='style.css', v=assetVersion)}}" rel="stylesheet" />
@@ -43,41 +118,50 @@
                 <table>
                     <tr>
                         <td><a href="https://github.com/zarmstrong" target="_blank"
-                                rel="noopener noreferrer">zarmstrong</a></td>
+                                rel="noopener noreferrer">
+                                <img alt="GitHub"
+                                    src="https://img.shields.io/badge/GitHub-zarmstrong-181717?style=flat&amp;logo=github&amp;logoColor=white" /></a>
+                        </td>
                     </tr>
                     <tr>
-                        <td><a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/blob/master/LICENSE">
+                        <td><a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/blob/master/LICENSE" target="_blank"
+                    rel="noopener noreferrer">
                                 <img alt="License"
                                     src="https://img.shields.io/github/license/zarmstrong/Twitch-Channel-Points-Miner-v3" /></a>
                         </td>
                     </tr>
                     <tr>
-                        <td><a href="https://www.python.org/downloads/">
+                        <td><a href="https://www.python.org/downloads/" target="_blank"
+                    rel="noopener noreferrer">
                                 <img alt="Python3"
                                     src="https://img.shields.io/badge/built%20for-Python%203.11--3.14-red.svg?style=flat"></a>
                         </td>
                     </tr>
                     <tr>
-                        <td><a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/pulls">
+                        <td><a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/pulls" target="_blank"
+                    rel="noopener noreferrer">
                                 <img alt="PRsWelcome"
                                     src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat" /></a>
                         </td>
                     </tr>
                     <tr>
-                        <td><a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/stargazers">
+                        <td><a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/stargazers" target="_blank"
+                    rel="noopener noreferrer">
                                 <img alt="GitHub Repo stars"
                                     src="https://img.shields.io/github/stars/zarmstrong/Twitch-Channel-Points-Miner-v3" /></a>
                         </td>
                     </tr>
                     <tr>
                         <td><a
-                                href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues?q=is%3Aissue+is%3Aclosed">
+                                href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/issues?q=is%3Aissue+is%3Aclosed" target="_blank"
+                    rel="noopener noreferrer">
                                 <img alt="GitHub closed issues"
                                     src="https://img.shields.io/github/issues-closed/zarmstrong/Twitch-Channel-Points-Miner-v3"></a>
                         </td>
                     </tr>
                     <tr>
-                        <td><a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3">
+                        <td><a href="https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3" target="_blank"
+                    rel="noopener noreferrer">
                                 <img alt="GitHub last commit"
                                     src="https://img.shields.io/github/last-commit/zarmstrong/Twitch-Channel-Points-Miner-v3" /></a>
                         </td>
@@ -92,14 +176,10 @@
                     <button id="tab-points" class="button is-small is-link" type="button" onclick="switchDashboardTab('points')">Points</button>
                     <button id="tab-drops" class="button is-small" type="button" onclick="switchDashboardTab('drops')">Drops</button>
                     <button id="tab-config" class="button is-small" type="button" onclick="switchDashboardTab('config')">Config</button>
+                    <button id="tab-logs" class="button is-small" type="button" onclick="switchDashboardTab('logs')">Logs</button>
                 </div>
             </div>
             <div class="column has-text-right top-controls" style="margin: auto">
-                <button id="auto-update-log">⏸️</button>
-                <label class="checkbox checkbox-label">
-                    Log
-                    <input type="checkbox" id="log">
-                </label>
                 <label class="checkbox checkbox-label">
                     Annotations
                     <input type="checkbox" checked="true" id="annotations">
@@ -334,15 +414,21 @@
             </div>
             <p class="config-reload-note">Dashboard changes are written directly to <code>config.py</code>. Streamer additions/removals and category list changes reload automatically; other settings take effect after restart.</p>
         </div>
-        <div class="columns">
-            <div class="column is-12">
-                <div class="box" id="log-box" style="padding: 0.30rem; display: none;">
-                    <pre id="log-content">In your run.py file set save=True in logger_settings to save logs to a file.&#10;&#13;</pre>
+
+        <div id="logs-panel" style="display: none;">
+            <div class="columns">
+                <div class="column is-12">
+                    <div class="box" id="log-box" style="padding: 0.30rem;">
+                        <div class="logs-toolbar">
+                            <button id="auto-update-log" type="button" title="Pause/resume log auto-update">⏸️</button>
+                        </div>
+                        <pre id="log-content">In your config.py file, set save=True in MINER_CONFIG['logger_settings'] to save logs to a file and see them here.&#10;&#13;</pre>
+                    </div>
                 </div>
             </div>
         </div>
         <footer class="analytics-footer">
-            <span>Running version {{ currentVersion }}.</span>
+            <span>Running version {{ currentVersion }}{% if buildCommit %} ({{ buildCommit }}){% endif %}.</span>
             {% if latestVersion %}
             <span class="footer-update-available">
                 <a href="{{ updateReleaseUrl }}" target="_blank" rel="noopener noreferrer">Upgrade available: {{ latestVersion }}</a>.
@@ -371,6 +457,21 @@
                 <button id="analytics-delete-modal-confirm" class="button is-danger" type="button">
                     Delete analytics data
                 </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="confirm-modal" class="analytics-modal" role="dialog" aria-modal="true"
+        aria-labelledby="confirm-modal-title" aria-describedby="confirm-modal-message" aria-hidden="true">
+        <div class="analytics-modal-card">
+            <div class="analytics-modal-icon" aria-hidden="true">
+                <i class="fas fa-trash-alt"></i>
+            </div>
+            <h2 id="confirm-modal-title" class="analytics-modal-title"></h2>
+            <p id="confirm-modal-message" class="analytics-modal-message"></p>
+            <div class="analytics-modal-actions">
+                <button id="confirm-modal-cancel" class="button" type="button">Cancel</button>
+                <button id="confirm-modal-confirm" class="button is-danger" type="button">Remove</button>
             </div>
         </div>
     </div>

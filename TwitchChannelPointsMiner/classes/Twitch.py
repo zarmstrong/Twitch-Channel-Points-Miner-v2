@@ -112,6 +112,7 @@ class Twitch(object):
         "evaluated_category_campaigns",
         "completed_drop_campaigns",
         "campaign_game_slugs",
+        "reward_campaign_ids",
         "available_badge_names",
         "drop_badge_rewards",
         "restart_requested",
@@ -182,6 +183,13 @@ class Twitch(object):
         self.evaluated_category_campaigns = set()
         self.completed_drop_campaigns = set()
         self.campaign_game_slugs = {}
+        # Campaign IDs confirmed to require a subscription/gift/cheer rather
+        # than watch time. Populated from the account-wide campaign
+        # evaluation and consulted by per-channel discovery too, since that
+        # channel-specific query doesn't carry the same earn-mechanism field
+        # and would otherwise treat a purchase-gated campaign as watchable
+        # whenever it lacks personalized claim-state data.
+        self.reward_campaign_ids = set()
         self.available_badge_names = None
         self.drop_badge_rewards = []
         self.restart_requested = Event()
@@ -1571,7 +1579,17 @@ class Twitch(object):
                 continue
             campaign_id = campaign.get("id")
             if campaign_id not in [None, ""]:
-                campaigns_by_id[str(campaign_id)] = campaign
+                campaign_id = str(campaign_id)
+                # DropCampaignDetails doesn't distinguish drop vs reward
+                # campaigns, so carry the earn-mechanism tag over from the
+                # pre-refresh record rather than losing it here.
+                previous = campaigns_by_id.get(campaign_id)
+                if previous is not None:
+                    campaign.setdefault(
+                        "_is_reward_campaign",
+                        previous.get("_is_reward_campaign", False),
+                    )
+                campaigns_by_id[campaign_id] = campaign
 
         # Older inventory variants expose only campaign IDs. Resolve any IDs
         # missing from the available records so their games remain authoritative.
@@ -1617,11 +1635,23 @@ class Twitch(object):
         for campaign_id, campaign in campaigns_by_id.items():
             if not isinstance(campaign, dict):
                 continue
+            is_reward_campaign = campaign.get("_is_reward_campaign") is True
+            if is_reward_campaign is True:
+                # Record this globally (independent of completion/category
+                # match below) so per-channel discovery -- which has no
+                # earn-mechanism field of its own -- can also recognize and
+                # exclude it.
+                self.reward_campaign_ids.add(campaign_id)
             game = campaign.get("game") or {}
             game_name = (game.get("displayName") or game.get("name") or "").strip()
             game_slug = self.__slugify(game_name) if game_name else ""
             if campaign_id in completed_campaign_ids:
-                if game_slug:
+                # A purchase-gated reward campaign's completion status says
+                # nothing about a separate, still-incomplete drop campaign
+                # for the same game -- don't let it mark this game_slug as
+                # Twitch-evaluated, or it would suppress a legitimate
+                # external/gist deadline for that other campaign below.
+                if game_slug and is_reward_campaign is not True:
                     self.campaign_game_slugs[campaign_id] = game_slug
                 campaign_evaluations.append(
                     {
@@ -1632,7 +1662,7 @@ class Twitch(object):
                         "skip_reason": "completed_campaign",
                     }
                 )
-                if game_name:
+                if game_name and is_reward_campaign is not True:
                     twitch_category_slugs.add(game_slug)
                 continue
             inventory_campaign = inventory_campaigns.get(campaign_id)
@@ -1643,7 +1673,7 @@ class Twitch(object):
                 game = campaign.get("game") or {}
                 game_name = (game.get("displayName") or game.get("name") or "").strip()
                 game_slug = self.__slugify(game_name) if game_name else ""
-            if game_slug:
+            if game_slug and is_reward_campaign is not True:
                 self.campaign_game_slugs[campaign_id] = game_slug
                 twitch_category_slugs.add(game_slug)
             matches_configured_category = _slug_requested(game_slug)
@@ -1666,6 +1696,15 @@ class Twitch(object):
                     if game_slug == ""
                     else "category_not_configured"
                 )
+                campaign_evaluations.append(evaluation)
+                continue
+
+            if is_reward_campaign is True:
+                # Completed by subscribing/gifting/cheering, not by watch
+                # time -- never minable, and must not stand in as the
+                # authoritative verdict for this game's category eligibility.
+                evaluation["active_incomplete"] = None
+                evaluation["skip_reason"] = "requires_subscription_or_purchase"
                 campaign_evaluations.append(evaluation)
                 continue
 
@@ -2375,9 +2414,17 @@ class Twitch(object):
             twitch_category_slugs,
         ) = self.__active_drop_category_slugs_from_campaigns(inventory, None)
         twitch_candidate_count = len(active_category_deadlines)
+        twitch_evaluated_category_slugs = twitch_category_slugs.copy()
         if refresh_external_catalog or not getattr(
             self, "twitchdrops_app_catalog_complete", False
         ):
+            # __twitchdrops_app_fallback mutates twitch_category_slugs in place
+            # (it records every front-page match, not just Twitch-authoritative
+            # ones), so external_additions below must be filtered against the
+            # snapshot taken before this call -- otherwise every external
+            # candidate the fallback just found would also appear to already be
+            # "Twitch category slugs" and get excluded, silently zeroing out
+            # wildcard's external additions every cycle.
             fallback_deadlines = self.__twitchdrops_app_fallback(
                 None, twitch_category_slugs
             )
@@ -2386,7 +2433,7 @@ class Twitch(object):
         external_additions = {
             game_slug: deadline
             for game_slug, deadline in fallback_deadlines.items()
-            if game_slug not in twitch_category_slugs
+            if game_slug not in twitch_evaluated_category_slugs
         }
         active_category_deadlines.update(external_additions)
         # Replace, not merge: this call always evaluates every open campaign
@@ -2462,6 +2509,43 @@ class Twitch(object):
                 unique_labels.append(label)
 
         return ", ".join(unique_labels)
+
+    def __campaign_names_from_ids(self, campaign_ids, game_slug):
+        """Resolve campaign names for `stream.campaigns_ids` before the
+        slower sync_campaigns background pass has enriched
+        `stream.campaigns` with full Campaign objects. Falls back through
+        every source `__get_campaign_ids_from_streamer` can have populated:
+        per-channel advertised campaigns, the gist fallback, and Twitch's own
+        authoritative (native) campaign data -- in that order, since IDs can
+        come from any of them.
+        """
+        names = {}
+        remaining = {str(campaign_id) for campaign_id in campaign_ids or []}
+        if not remaining:
+            return []
+
+        for campaign_id in list(remaining):
+            campaign = self.advertised_drop_campaigns.get(campaign_id)
+            if isinstance(campaign, dict) and campaign.get("name"):
+                names[campaign_id] = campaign["name"]
+                remaining.discard(campaign_id)
+
+        if remaining:
+            for source in (
+                self.twitchdrops_app_campaigns.get(game_slug, []),
+                self.active_drop_campaigns.get(game_slug, []),
+            ):
+                if not remaining:
+                    break
+                for campaign in source or []:
+                    if not isinstance(campaign, dict):
+                        continue
+                    campaign_id = str(campaign.get("id") or "")
+                    if campaign_id in remaining and campaign.get("name"):
+                        names[campaign_id] = campaign["name"]
+                        remaining.discard(campaign_id)
+
+        return [names[campaign_id] for campaign_id in names]
 
     def __campaign_signature(self, campaigns):
         campaign_ids = [
@@ -2647,6 +2731,11 @@ class Twitch(object):
                 return "wildcard campaign drops"
             if getattr(streamer, "from_category", False) is True:
                 return "campaign drops"
+            if (
+                getattr(streamer, "explicitly_configured", False) is not True
+                and getattr(streamer, "from_followers", False) is True
+            ):
+                return "followed channel"
             return "streamer"
 
         points_streams = [
@@ -2661,14 +2750,30 @@ class Twitch(object):
                 continue
 
             campaigns = self.__describe_campaigns(streamer.stream.campaigns)
+            game_label = self.__stream_game_label(streamer.stream)
+            if not campaigns:
+                # stream.campaigns is only enriched by the slower
+                # sync_campaigns background pass, so a just-selected streamer
+                # can still be showing a bare "<game> drops" label here. Try
+                # resolving the specific campaign name(s) from
+                # campaigns_ids/discovery state instead, since a game can
+                # have more than one active drop campaign at once and which
+                # one is actually being watched is worth knowing immediately.
+                names = self.__campaign_names_from_ids(
+                    getattr(streamer.stream, "campaigns_ids", []),
+                    self.__slugify(game_label) if game_label else "",
+                )
+                if names:
+                    campaigns = ", ".join(
+                        dict.fromkeys(
+                            f"{game_label} drop campaign '{name}'" for name in names
+                        )
+                    )
             reason = watch_reason(streamer)
             drops_streams.append(
                 f"{streamer.username} ({reason}; {campaigns})"
                 if campaigns
-                else (
-                    f"{streamer.username} "
-                    f"({reason}; {self.__stream_game_label(streamer.stream)} drops)"
-                )
+                else f"{streamer.username} ({reason}; {game_label} drops)"
             )
 
         logger.info(
@@ -4134,7 +4239,30 @@ class Twitch(object):
             ):
                 continue
             campaign_id = str(campaign.get("id") or "")
-            if campaign_id == "":
+            if campaign_id == "" or campaign_id in self.reward_campaign_ids:
+                # A campaign already confirmed subscription/gift/cheer-gated
+                # by the account-wide evaluation is excluded here by ID.
+                continue
+            if (
+                self.__active_incomplete_drop_deadline(
+                    campaign, set(), set(), set(), log_status=False
+                )
+                is None
+            ):
+                # The account-wide evaluation doesn't always see the same
+                # campaign this channel-specific query does (it can rotate
+                # out of the dashboard/reward query independently), so
+                # reward_campaign_ids alone isn't reliable here. Fall back to
+                # asking the same question the eligibility count below asks:
+                # does this campaign currently have any drop that's watchable
+                # (in its date window, requires real minutes watched, not
+                # already claimed)? A purchase-gated campaign's drop reports
+                # zero required minutes and fails this the same way a fully
+                # claimed or not-yet-started campaign would -- in every case,
+                # nothing is gained by anchoring this channel's campaign_ids
+                # to it instead of falling through to the gist/authoritative
+                # fallback below, which may know about a separate, genuinely
+                # incomplete campaign for this same channel.
                 continue
             normalized_campaign = self.__normalize_advertised_campaign(campaign)
             advertised_campaigns.append(normalized_campaign)
@@ -4547,6 +4675,9 @@ class Twitch(object):
             )
 
         campaigns = list(campaigns_by_id.values())
+        for campaign in campaigns:
+            if isinstance(campaign, dict):
+                campaign["_is_reward_campaign"] = True
         debug["total_unique"] = len(campaigns)
         return campaigns, debug
 
@@ -4620,17 +4751,32 @@ class Twitch(object):
         current_user = data.get("currentUser", {})
         campaigns = []
 
-        for key in [
-            "dropCampaigns",
-            "rewardCampaigns",
-            "dropCampaignsInProgress",
-            "rewardCampaignsInProgress",
+        # Twitch's schema splits campaigns by how they're completed, not by
+        # what they reward: dropCampaigns* are finished with watch time
+        # (regardless of whether the prize is an in-game item or a badge),
+        # while rewardCampaigns* require spending money (subscribing,
+        # gifting, cheering). Tag each campaign with its earn-mechanism here,
+        # at the only point where the source field name is still known, so
+        # later eligibility checks can exclude purchase-gated campaigns
+        # without touching genuine watch-time badge drops.
+        for key, is_reward in [
+            ("dropCampaigns", False),
+            ("rewardCampaigns", True),
+            ("dropCampaignsInProgress", False),
+            ("rewardCampaignsInProgress", True),
         ]:
-            campaigns.extend(current_user.get(key, []) or [])
+            for campaign in current_user.get(key, []) or []:
+                if isinstance(campaign, dict):
+                    campaign.setdefault("_is_reward_campaign", is_reward)
+                campaigns.append(campaign)
 
         # Twitch may place globally available reward campaigns here.
-        campaigns.extend(data.get("rewardCampaignsAvailableToUser", []) or [])
-        campaigns.extend(current_user.get("rewardCampaignsAvailableToUser", []) or [])
+        for campaign in list(
+            data.get("rewardCampaignsAvailableToUser", []) or []
+        ) + list(current_user.get("rewardCampaignsAvailableToUser", []) or []):
+            if isinstance(campaign, dict):
+                campaign.setdefault("_is_reward_campaign", True)
+            campaigns.append(campaign)
 
         campaigns_by_id = {}
         for campaign in campaigns:
@@ -5018,8 +5164,13 @@ class Twitch(object):
                     if isinstance(drop_self, dict):
                         is_claimed = drop_self.get("isClaimed") is True
                         drop_instance_id = drop_self.get("dropInstanceID")
-                        is_claimable = (is_claimed is False) and (
-                            drop_instance_id is not None
+                        # campaign_ref.sync_drops() above already attempts to claim
+                        # any matching drop it tracks, so only fall back to claiming
+                        # here when we have no local campaign to have done that.
+                        is_claimable = (
+                            (is_claimed is False)
+                            and (drop_instance_id is not None)
+                            and (campaign_ref is None)
                         )
                         if is_claimable is True:
                             try:
@@ -5377,6 +5528,7 @@ class Twitch(object):
             return False
         try:
             if response.errors:
+                logger.error(f"Unable to claim {drop}: {response.errors}")
                 return False
             if response.status in [
                 "ELIGIBLE_FOR_ALL",
@@ -5407,6 +5559,7 @@ class Twitch(object):
                         item_art_url_override=variant.get("item_art_url"),
                     )
                 return True
+            logger.error(f"Unable to claim {drop}: unexpected status {response.status}")
             return False
         except (AttributeError, TypeError):
             return False

@@ -139,6 +139,21 @@ def test_badge_matching_accepts_safe_title_variants():
     )
 
 
+def test_badge_matching_normalizes_roman_numerals():
+    # Regression: Twitch's drop reward name and the account's earned-badge
+    # inventory name disagree on numeral style for the same badge (e.g.
+    # "Solasta 2 Multiplayer" vs "Solasta II Multiplayer"), which otherwise
+    # leaves a completed badge campaign perpetually "unearned".
+    assert (
+        badge_match_reason("Solasta 2 Multiplayer", "Solasta II", "Solasta II Multiplayer")
+        == "exact_title"
+    )
+    assert (
+        badge_match_reason("Solasta II Multiplayer", "Solasta II", "Solasta 2 Multiplayer")
+        == "exact_title"
+    )
+
+
 def test_badge_matching_rejects_unrelated_badge_words():
     assert (
         badge_match_reason(
@@ -297,6 +312,47 @@ def test_eligible_badge_campaigns_only_returns_active_unearned_watch_badges(
     assert [record["game_slug"] for record in eligible] == ["example-game"]
     assert eligible[0]["eligible_drops"][0]["name"] == "Example Badge"
     assert owned == []
+
+
+def test_eligible_badge_campaigns_recognizes_owned_badge_with_mismatched_numeral(
+    tmp_path,
+):
+    # Regression: the drop's reward name uses an Arabic numeral ("Solasta 2
+    # Multiplayer") while the account's earned-badge inventory reports the
+    # same badge with a Roman numeral ("Solasta II Multiplayer"). Before
+    # numeral normalization, this campaign was never recognized as already
+    # earned and kept getting rewatched indefinitely.
+    catalog = DropBadgeCatalog(
+        SimpleNamespace(get_auth_token=lambda: "token"),
+        tmp_path,
+        scraper=FakeScraper(),
+        session=FakeSession(),
+    )
+    now = datetime.now(timezone.utc)
+    catalog.state["campaigns"] = {
+        "solasta-launch": {
+            "game_slug": "solasta-ii",
+            "game": "Solasta II",
+            "source_group": "campaigns",
+            "campaign": {
+                "starts_at": (now - timedelta(hours=1)).isoformat(),
+                "ends_at": (now + timedelta(hours=1)).isoformat(),
+                "drops": [
+                    {
+                        "name": "Solasta 2 Multiplayer",
+                        "requirement": "Watch 1h",
+                        "badge_classification": {"status": "BADGE"},
+                    }
+                ],
+            },
+        },
+    }
+
+    unearned = catalog.eligible_badge_campaigns()
+    earned = catalog.eligible_badge_campaigns({"Solasta II Multiplayer"})
+
+    assert [record["game_slug"] for record in unearned] == ["solasta-ii"]
+    assert earned == []
 
 
 def test_eligible_badge_campaigns_excludes_campaign_matched_by_completion_signature(

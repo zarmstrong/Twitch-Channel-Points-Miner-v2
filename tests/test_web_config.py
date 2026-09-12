@@ -23,9 +23,11 @@ from TwitchChannelPointsMiner.classes.entities.PubsubTopic import PubsubTopic
 from TwitchChannelPointsMiner.classes.entities.Streamer import Streamer
 from TwitchChannelPointsMiner.config_editor import (
     ConfigEditError,
+    enable_analytics_dashboard,
     load_web_overrides,
     migrate_web_config,
     read_managed_web_config,
+    set_miner_username,
     update_managed_web_config,
 )
 from TwitchChannelPointsMiner.logger import LoggerSettings
@@ -486,6 +488,32 @@ def test_invalid_category_error_uses_supported_value_terminology(tmp_path):
         )
 
 
+def test_remove_streamer_with_name_manual_config_would_reject_on_add(tmp_path):
+    # STREAMERS entered directly in config.py aren't required to satisfy the
+    # add-time username format (e.g. a hyphenated or over-length name). Remove
+    # must still work for such an entry instead of re-validating its format.
+    config = tmp_path / "config.py"
+    write_config(config)
+    update_managed_web_config(
+        config,
+        {"action": "add", "kind": "streamers", "value": "legacy_placeholder"},
+    )
+    source = config.read_text(encoding="utf-8")
+    config.write_text(
+        source.replace("legacy_placeholder", "legacy-name-with-hyphen"),
+        encoding="utf-8",
+    )
+
+    result = update_managed_web_config(
+        config,
+        {"action": "remove", "kind": "streamers", "value": "legacy-name-with-hyphen"},
+    )
+
+    assert "legacy-name-with-hyphen" not in [
+        streamer["username"] for streamer in result["streamers"]
+    ]
+
+
 @pytest.mark.parametrize("kind", ["streamers", "categories"])
 @pytest.mark.parametrize("action", ["add", "remove"])
 @pytest.mark.parametrize("value", [None, 123, True, [], {}])
@@ -817,6 +845,141 @@ ANALYTICS_CONFIG = None
     assert any(
         source.name == "FOLLOWERS"
         for source in namespace["MINER_CONFIG"]["streamer_source_priority"]
+    )
+
+
+def test_enable_analytics_dashboard_preserves_formatting_and_comments(tmp_path):
+    # Used by the Windows desktop shell's one-time "enable the dashboard?"
+    # consent prompt and its on-demand "Enable dashboard" button - a
+    # deliberate, in-the-moment user action, so (unlike the shell's silent
+    # first-run bootstrap) it must go through this source-preserving path
+    # and leave the rest of the file - comments included - untouched.
+    config = tmp_path / "config.py"
+    config.write_text(
+        """\
+# my custom header comment
+MINER_CONFIG = {
+    "username": "someone",  # inline comment
+    "enable_analytics": False,
+}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+""",
+        encoding="utf-8",
+    )
+
+    enable_analytics_dashboard(config, password="generated-secret")
+
+    source = config.read_text(encoding="utf-8")
+    assert "# my custom header comment" in source
+    assert '"username": "someone",  # inline comment' in source
+
+    module = _load_config(config)
+    assert module.MINER_CONFIG["enable_analytics"] is True
+    assert module.ANALYTICS_CONFIG == {
+        "host": "127.0.0.1",
+        "port": 54455,
+        "refresh": 5,
+        "days_ago": 7,
+        "password": "generated-secret",
+        "log_poll_interval": 5,
+    }
+
+
+def test_enable_analytics_dashboard_respects_existing_analytics_config(tmp_path):
+    # A user may have pre-configured analytics settings while leaving it
+    # switched off; enabling it must not clobber those with fresh defaults
+    # and an unrelated generated password.
+    from TwitchChannelPointsMiner.config_migration import CONFIG_VERSION
+
+    config = tmp_path / "config.py"
+    # CONFIG_VERSION matches the current schema so _load_config's own,
+    # unrelated schema migration (which legitimately backfills missing
+    # ANALYTICS_CONFIG keys like refresh/days_ago on an *old*-schema config)
+    # is a verified no-op - isolating enable_analytics_dashboard's own
+    # behavior, which is what this test is about.
+    config.write_text(
+        f"""\
+CONFIG_VERSION = {CONFIG_VERSION}
+MINER_CONFIG = {{
+    "enable_analytics": False,
+}}
+STREAMERS = []
+MINE_CONFIG = {{}}
+ANALYTICS_CONFIG = {{
+    "host": "127.0.0.1",
+    "port": 9999,
+    "password": "already-set-by-user",
+}}
+""",
+        encoding="utf-8",
+    )
+
+    enable_analytics_dashboard(config, password="should-not-be-used")
+
+    module = _load_config(config)
+    assert module.MINER_CONFIG["enable_analytics"] is True
+    assert module.ANALYTICS_CONFIG == {
+        "host": "127.0.0.1",
+        "port": 9999,
+        "password": "already-set-by-user",
+    }
+
+
+def test_enable_analytics_dashboard_requires_analytics_config_assignment(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        'MINER_CONFIG = {"enable_analytics": False}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigEditError, match="ANALYTICS_CONFIG"):
+        enable_analytics_dashboard(config, password="secret")
+
+
+def test_set_miner_username_preserves_formatting_and_comments(tmp_path):
+    # Used by the Windows desktop shell's first-run setup panel, which
+    # collects a real Twitch username before mining starts (see
+    # windows_launcher.py's _needs_username/WindowApi.submit_username) - a
+    # deliberate, in-the-moment user action, so this must preserve the rest
+    # of the file, comments included, like every other dashboard-driven edit.
+    config = tmp_path / "config.py"
+    config.write_text(
+        """\
+# my custom header comment
+MINER_CONFIG = {
+    "username": "your-twitch-username",
+    "enable_analytics": False,  # inline comment
+}
+STREAMERS = []
+MINE_CONFIG = {}
+ANALYTICS_CONFIG = None
+""",
+        encoding="utf-8",
+    )
+
+    result = set_miner_username(config, "  real_twitch_user  ")
+
+    assert result == "real_twitch_user"
+    source = config.read_text(encoding="utf-8")
+    assert "# my custom header comment" in source
+    assert '"enable_analytics": False,  # inline comment' in source
+
+    module = _load_config(config)
+    assert module.MINER_CONFIG["username"] == "real_twitch_user"
+
+
+def test_set_miner_username_rejects_invalid_characters(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text('MINER_CONFIG = {"username": "your-twitch-username"}\n', encoding="utf-8")
+
+    with pytest.raises(ConfigEditError, match="valid Twitch username"):
+        set_miner_username(config, "not a valid username!!!")
+
+    assert (
+        config.read_text(encoding="utf-8")
+        == 'MINER_CONFIG = {"username": "your-twitch-username"}\n'
     )
 
 

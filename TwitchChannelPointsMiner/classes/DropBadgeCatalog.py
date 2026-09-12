@@ -36,8 +36,30 @@ def _parse_timestamp(value):
         return None
 
 
+# Twitch's own surfaces disagree on how a title's number is written -- a
+# drop's reward name may read "Solasta 2 Multiplayer" while the same badge's
+# name in the account's earned-badge inventory reads "Solasta II
+# Multiplayer". Left unnormalized, a plain word-equality match never
+# recognizes the two as the same badge, so a completed campaign is never
+# retired and keeps getting rewatched indefinitely. Numbers this small only
+# ever appear in game/sequel titles here, so the mapping is unambiguous.
+_ROMAN_TO_ARABIC = {
+    "i": "1",
+    "ii": "2",
+    "iii": "3",
+    "iv": "4",
+    "v": "5",
+    "vi": "6",
+    "vii": "7",
+    "viii": "8",
+    "ix": "9",
+    "x": "10",
+}
+
+
 def _words(value):
-    return re.findall(r"[a-z0-9]+", str(value or "").casefold())
+    raw_words = re.findall(r"[a-z0-9]+", str(value or "").casefold())
+    return [_ROMAN_TO_ARABIC.get(word, word) for word in raw_words]
 
 
 def _comparable_badge_words(value):

@@ -169,7 +169,7 @@ def test_main_still_converts_existing_legacy_runner(tmp_path, monkeypatch):
     monkeypatch.setattr(
         runner,
         "run_config",
-        lambda config, path: calls.append((config, path)),
+        lambda config, path, on_miner_ready=None: calls.append((config, path)),
     )
 
     result = runner.main(

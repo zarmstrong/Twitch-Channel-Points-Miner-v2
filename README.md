@@ -96,6 +96,7 @@ Read more about the channel points [here](https://help.twitch.tv/s/article/chann
     - [What converts automatically](#what-converts-automatically)
 8. 🍪 [Legacy cookie migration (optional)](#legacy-cookie-migration-optional)
 9. 🪟 [Windows](#windows)
+    - [Standard vs. portable](#standard-vs-portable)
     - [Install the Windows executable](#install-the-windows-executable)
     - [Set up your account](#set-up-your-account)
     - [Start the miner](#start-the-miner)
@@ -175,7 +176,7 @@ services:
       - ./logs:/usr/src/app/logs
       - ./config:/usr/src/app/config
     ports:
-      - "5000:5000"
+      - "54455:54455"
 ```
 
 Run `docker compose up`. On the first run, the container creates
@@ -198,7 +199,7 @@ docker run --rm -it \
     -v "$(pwd)/cookies:/usr/src/app/cookies" \
     -v "$(pwd)/logs:/usr/src/app/logs" \
     -v "$(pwd)/config:/usr/src/app/config" \
-    -p 5000:5000 \
+    -p 54455:54455 \
     zacharmstrong/twitch-channel-points-miner:latest
 ```
 
@@ -217,7 +218,7 @@ docker run --name twitch-miner -it \
     -v "$(pwd)/cookies:/usr/src/app/cookies" \
     -v "$(pwd)/logs:/usr/src/app/logs" \
     -v "$(pwd)/config:/usr/src/app/config" \
-    -p 5000:5000 \
+    -p 54455:54455 \
     zacharmstrong/twitch-channel-points-miner:latest
 ```
 
@@ -231,22 +232,27 @@ zones, and graceful shutdown behavior in more detail.
 
 #### Windows quick start
 
-The Windows executable does not require Python or Git.
+The Windows executable does not require Python or Git. Two distributions are
+published on every release: `TwitchChannelPointsMiner-<version>-Setup.exe`
+(installer, recommended) and `TwitchChannelPointsMiner-Portable-<version>.zip`
+(portable, no installation). They differ only in where configuration, login
+cookies, analytics, and logs are stored - the installer keeps them in your
+Windows user profile, separate from the program itself, while the portable
+build keeps everything beside the executable so the whole thing can be moved
+or run from removable media. See [Windows](#windows) for the full comparison.
 
-1. Download `TwitchChannelPointsMiner-<version>.zip` from the official
-   [Releases page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases).
-   You can also download `TwitchChannelPointsMiner-<version>-Setup.exe` if you
-   prefer guided installation; the steps below describe the ZIP workflow.
-2. Extract the whole archive to a permanent private folder; do not run it from
-   inside the ZIP.
-3. Run `TwitchChannelPointsMiner.exe` once. It creates `config\config.py` and
-   waits for you to press Enter before closing.
-4. Open `config\config.py` in a text editor, replace the example account and
-   streamers, and disable unused notification providers.
-5. Run the executable again and follow the Twitch sign-in instructions.
+1. Download `TwitchChannelPointsMiner-<version>-Setup.exe` from the official
+   [Releases page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases)
+   and run it. The steps below describe the installer; see
+   [Windows](#windows) for the portable ZIP instead.
+2. Let the installer finish and launch the app. It creates a configuration
+   file and opens a desktop window directly on the **Config** tab.
+3. Fill in your Twitch username and the channels to watch, or edit the
+   configuration file directly as described below.
+4. Follow the Twitch sign-in instructions shown in the window's Console tab.
 
-Keep the console open while mining. Stop with `Ctrl+C`. The later
-[Windows reference](#windows) covers updates and troubleshooting.
+The later [Windows reference](#windows) covers both distributions, updates,
+and troubleshooting in detail.
 
 #### Source checkout quick start
 
@@ -834,7 +840,7 @@ services:
       - ./logs:/usr/src/app/logs
       - ./config:/usr/src/app/config
     ports:
-      - "5000:5000"
+      - "54455:54455"
 ```
 
 **Example with docker run:**
@@ -847,7 +853,7 @@ docker run \
     -v $(pwd)/cookies:/usr/src/app/cookies \
     -v $(pwd)/logs:/usr/src/app/logs \
     -v $(pwd)/config:/usr/src/app/config \
-    -p 5000:5000 \
+    -p 54455:54455 \
     zacharmstrong/twitch-channel-points-miner
 ```
 
@@ -907,7 +913,7 @@ docker run --name user1 -it \
     -v $(pwd)/user1/cookies:/usr/src/app/cookies \
     -v $(pwd)/user1/logs:/usr/src/app/logs \
     -v $(pwd)/user1/analytics:/usr/src/app/analytics \
-    -p 5001:5000 \
+    -p 54456:54455 \
     zacharmstrong/twitch-channel-points-miner
 ```
 
@@ -917,7 +923,7 @@ docker run --name user2 -it \
     -v $(pwd)/user2/cookies:/usr/src/app/cookies \
     -v $(pwd)/user2/logs:/usr/src/app/logs \
     -v $(pwd)/user2/analytics:/usr/src/app/analytics \
-    -p 5002:5000 \
+    -p 54457:54455 \
     zacharmstrong/twitch-channel-points-miner
 ```
 
@@ -1437,6 +1443,9 @@ and HTTPS guidance described below.
 
 Enable storage with `MINER_CONFIG["enable_analytics"] = True` and configure the
 server through `ANALYTICS_CONFIG`. The chart refreshes every `refresh` minutes.
+`port` defaults to `54455` for a newly created `ANALYTICS_CONFIG` (chosen to
+avoid the common conflicts on port `5000`); an existing configuration that
+already sets `port` keeps that value untouched.
 The log viewer polls every `log_poll_interval` seconds (default `5`; accepted
 range `1` to `180`), and `days_ago` controls the chart's initial time range.
 
@@ -1453,7 +1462,7 @@ MINER_CONFIG = {
 
 ANALYTICS_CONFIG = {
     "host": "127.0.0.1",
-    "port": 5000,
+    "port": 54455,
     "refresh": 5,
     "days_ago": 7,
     "log_poll_interval": 5,
@@ -1462,7 +1471,7 @@ ANALYTICS_CONFIG = {
 
 ### Analytics security and HTTPS reverse proxy
 
-The analytics server contains account activity and miner logs. Its built-in authentication uses HTTP Basic authentication, which does not encrypt credentials or response data. Binding it to `0.0.0.0` exposes it to every reachable network interface; use a strong, unique analytics password and do not expose port 5000 directly to the internet.
+The analytics server contains account activity and miner logs. Its built-in authentication uses HTTP Basic authentication, which does not encrypt credentials or response data. Binding it to `0.0.0.0` exposes it to every reachable network interface; use a strong, unique analytics password and do not expose the analytics port (`54455` by default) directly to the internet.
 
 For remote access, keep the miner bound to loopback and terminate HTTPS in a reverse proxy. A minimal nginx location looks like this:
 
@@ -1475,7 +1484,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/analytics.example.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:5000;
+        proxy_pass http://127.0.0.1:54455;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
@@ -1666,88 +1675,137 @@ previously valid saved token, the miner clears the cached login and restarts so
 that reauthentication can occur; follow the instructions printed in the logs.
 
 ## Windows
-The Windows executable does not require Python, Git, or Command Prompt. Keep its
-folder private because it will contain your Twitch login and saved session.
+The Windows executable does not require Python, Git, or Command Prompt.
+
+### Standard vs. portable
+
+Two distributions are published on every release, identical in features and
+differing only in where they keep configuration, Twitch login cookies,
+analytics, and logs:
+
+- **Standard** (`TwitchChannelPointsMiner-<version>-Setup.exe`, recommended):
+  an installer that stores your data in your Windows user profile
+  (`%LOCALAPPDATA%\TwitchChannelPointsMiner`), separate from the installed
+  program. Reinstalling, updating, or uninstalling the app never touches it.
+- **Portable** (`TwitchChannelPointsMiner-Portable-<version>.zip`): no
+  installation - keeps everything beside the executable, so the whole folder
+  can be moved, copied, or run from removable media. Keep its folder private,
+  since it contains your Twitch login and saved session.
+
+If you already used an older release (which always behaved like the portable
+build, even when installed) and switch to the Standard installer, the app
+detects your existing configuration, cookies, and analytics beside the old
+executable on its first run, moves them into the new location automatically,
+and shows a one-time confirmation dialog. Your original files are archived
+untouched in a `config-legacy` folder next to where the old executable was,
+so nothing is lost; this only happens once.
 
 ### Install the Windows executable
 
 1. Open the project's
    [Releases page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases)
    and select the newest release.
-2. Under **Assets**, download the file named
-   `TwitchChannelPointsMiner-<version>.zip`. Do not download **Source code**.
-   If you prefer an installer, download
-   `TwitchChannelPointsMiner-<version>-Setup.exe` and follow its prompts instead
-   of the ZIP extraction steps below.
-3. Open your **Downloads** folder, right-click the downloaded ZIP file, and
-   select **Extract All...**.
-4. Choose a permanent location that you can easily find, such as
-   `Documents\TwitchChannelPointsMiner`, and select **Extract**. Do not run the
-   program from inside the ZIP file.
-5. Open the extracted folder and double-click `TwitchChannelPointsMiner.exe`.
-   The first run creates the configuration file and waits for you to press Enter
-   before closing, so its instructions remain visible.
+2. Under **Assets**, download `TwitchChannelPointsMiner-<version>-Setup.exe`
+   for the Standard installer (recommended), or
+   `TwitchChannelPointsMiner-Portable-<version>.zip` for the portable build.
+   Do not download **Source code**.
+   - **Installer:** run the downloaded `.exe` and follow its prompts.
+   - **Portable:** open your **Downloads** folder, right-click the ZIP file,
+     select **Extract All...**, choose a permanent location you can easily
+     find (such as `Documents\TwitchChannelPointsMiner`), and select
+     **Extract**. Do not run the program from inside the ZIP file.
+3. Launch the app (the installer offers to do this automatically; for the
+   portable build, open the extracted folder and double-click
+   `TwitchChannelPointsMiner-Portable.exe`). The first run creates the
+   configuration file and opens a desktop window directly on the **Config**
+   tab, ready for you to fill in.
 
 Only download the executable from the project's official Releases page. If
 Microsoft Defender SmartScreen appears, check that the publisher warning names
-`TwitchChannelPointsMiner.exe` and that you used the link above. Then select
+the file you downloaded and that you used the link above. Then select
 **More info** followed by **Run anyway**. If the file came from anywhere else,
 delete it instead.
 
 ### Set up your account
 
-1. In the extracted folder, open the new `config` folder.
-2. Right-click `config.py`, select **Open with**, and choose **Notepad**. Keep the
-   `.py` filename; do not rename it to `.txt`.
-3. Find `your-twitch-username` and replace it with your Twitch login name.
-4. Find the `STREAMERS = [` section near the middle of the file. Replace the
-   example streamer names with the channels you want to watch. Use login names
-   from their Twitch URLs, without `https://twitch.tv/` or the `@` symbol.
-5. Review the other settings and comments in the file. In particular, remove or
-   disable example notification services that you do not use. The
-   [configuration guide](#configuration-file) explains every section and links
-   to the complete examples.
-6. In Notepad, select **File > Save**, then close Notepad.
+The desktop window has two tabs: **Dashboard** (the analytics dashboard,
+embedded) and **Console** (the miner's live log output). On first run it
+opens straight to the Dashboard tab's **Config** view.
 
-The generated file is the full configuration template. You can return to it
-later to enable followed channels, Drops categories, predictions,
-notifications, and other settings without starting over.
+1. If the window asks for a username and password, use your Twitch username
+   and the password printed on the **Console** tab (also saved in
+   `config\config.py`, under `ANALYTICS_CONFIG`).
+2. Under **Configured streamers**, add the channels you want to watch.
+3. Review the other Config tab sections - categories, sources, logging, and
+   notifications. The [configuration guide](#configuration-file) explains
+   every section in more detail; anything not covered by the Config tab can
+   still be edited directly in `config\config.py` with Notepad.
+
+Changes made in the Config tab are written to `config\config.py`
+automatically; streamer and category changes take effect immediately, and
+other settings after a restart. You can return to this tab any time to enable
+followed channels, Drops categories, predictions, notifications, and other
+settings.
 
 ### Start the miner
 
-Double-click `TwitchChannelPointsMiner.exe` again. Leave the black console window
-open while the miner is running and follow any Twitch sign-in instructions it
-shows. To stop the miner, click the console window and press `Ctrl+C`, or close
-the window.
+The miner starts automatically as soon as the desktop window opens - there is
+no separate step. Watch its progress on the **Dashboard** tab. If Twitch sign-in
+is needed, a window pops up with the activation link and code to enter (also
+available, along with startup errors if the dashboard itself fails to load, on
+the **Console** tab). Use **Open in browser** on either tab to view the
+dashboard in your default browser instead.
 
-The miner saves its settings, login session, and logs in folders beside the
-executable. Do not move the executable by itself after setup; move the entire
-`TwitchChannelPointsMiner` folder if you want it in a different location.
+Closing the window stops the miner. Where its settings, login session, and
+logs are saved depends on which distribution you installed (see
+[Standard vs. portable](#standard-vs-portable) above):
+
+- **Standard:** in your Windows user profile
+  (`%LOCALAPPDATA%\TwitchChannelPointsMiner`), independent of the installed
+  program's location.
+- **Portable:** in folders beside the executable. Do not move the executable
+  by itself after setup; move the entire `TwitchChannelPointsMiner` folder if
+  you want it in a different location.
 
 ### Update the miner
 
-1. Stop the running miner.
-2. Download and extract the newest release as described above.
-3. Copy the new `TwitchChannelPointsMiner.exe` into your existing miner folder.
-4. When Windows asks, choose **Replace the file in the destination**.
-5. Start the miner normally. Your existing configuration and login data remain
-   in place.
+- **Standard:** download and run the newest `-Setup.exe` from the
+  [Releases page](https://github.com/zarmstrong/Twitch-Channel-Points-Miner-v3/releases)
+  and follow its prompts; it updates the installed program in place. Your
+  configuration and login data live outside the install directory and are
+  never affected.
+- **Portable:**
+  1. Stop the running miner.
+  2. Download and extract the newest portable ZIP as described above.
+  3. Copy the new `TwitchChannelPointsMiner-Portable.exe` into your existing
+     miner folder.
+  4. When Windows asks, choose **Replace the file in the destination**.
+  5. Start the miner normally. Your existing configuration and login data
+     remain in place.
 
 ### Windows troubleshooting
 
-- **The first-run window asks you to press Enter:** This keeps the setup
-  instructions visible. Open `config\config.py`, finish
-  [Set up your account](#set-up-your-account), and run the executable again.
-- **Windows says it cannot find the configuration:** Right-click the downloaded
-  ZIP and use **Extract All...** before running the executable.
-- **Notepad saved `config.py.txt`:** In File Explorer, enable **View > Show >
-  File name extensions**, then rename the file to `config.py`.
+- **The desktop window never appears, or a console window flashes and
+  closes:** The executable needs the Microsoft Edge WebView2 runtime, which
+  ships with Windows 11 and most up-to-date Windows 10 installs. If it's
+  missing, install the
+  [Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+  and run the executable again.
+- **The Dashboard tab shows "The dashboard isn't available yet":** Check the
+  Console tab for the reason. Analytics may still be starting up, or
+  `enable_analytics` may be set to `False` in `config\config.py`.
+- **Windows says it cannot find the configuration (portable build only):**
+  Right-click the downloaded ZIP and use **Extract All...** before running the
+  executable.
 - **Emoji or symbols look broken:** In `config.py`, use
   `LoggerSettings(emoji=False)` in `MINER_CONFIG["logger_settings"]`. See
   [LoggerSettings](#loggersettings) for the complete example.
-- **The miner closes or reports an error after setup:** Open the `logs` folder
-  beside the executable and check the newest log file. Remove account names,
-  cookies, tokens, and passwords before sharing a log in a bug report.
+- **The miner closes or reports an error after setup:** Check the Console tab,
+  or use the desktop window's **Open logs folder** button (or open
+  `%LOCALAPPDATA%\TwitchChannelPointsMiner\logs` for a Standard install, or
+  the `logs` folder beside the executable for a portable one) and check the
+  newest log file. Remove account names, cookies, tokens, and passwords
+  before sharing a log in a bug report.
 
 Developers who want to create the executable from source can use the
 [Windows build guide](BUILD.md#windows-executable).

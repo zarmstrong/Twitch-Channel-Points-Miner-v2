@@ -515,6 +515,21 @@ class TwitchChannelPointsMiner:
         logger.info(GITHUB_REPOSITORY_URL)
         self.__check_for_update()
 
+        self._register_signal_handlers()
+
+    def _register_signal_handlers(self):
+        """Install SIGINT/SIGSEGV/SIGTERM handlers so Ctrl+C (or an external
+        termination signal) triggers a graceful shutdown via self.end().
+
+        signal.signal() raises ValueError outside the main thread of the
+        main interpreter - e.g. the Windows desktop shell runs the miner on
+        a background thread so pywebview's blocking loop can own the main
+        thread. There's simply no signal to catch in that case (window-close
+        handling there is done separately, via pywebview's own close event),
+        so this is a no-op instead of crashing.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            return
         for sign in [signal.SIGINT, signal.SIGSEGV, signal.SIGTERM]:
             signal.signal(sign, self.end)
 
@@ -2050,8 +2065,19 @@ class TwitchChannelPointsMiner:
         # Prevent breaks of .json file
         for streamer in self.streamers:
             if streamer.mutex.locked():
-                streamer.mutex.acquire()
-                streamer.mutex.release()
+                # Bounded, unlike a bare acquire() - a save still in
+                # progress (e.g. a slow/hung disk write, or another thread
+                # queued behind it on the shared ANALYTICS_FILE_MUTEX) must
+                # not be able to hang shutdown forever, the same as every
+                # other join in this method already tolerates its thread
+                # not stopping in time.
+                if streamer.mutex.acquire(timeout=30):
+                    streamer.mutex.release()
+                else:
+                    logger.warning(
+                        f"Mutex for {streamer} did not release in time, "
+                        "continuing shutdown anyway"
+                    )
 
         self.__print_report()
 

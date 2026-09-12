@@ -245,7 +245,7 @@ def _watch_config(path, miner, initial_config, interval):
             )
 
 
-def run_config(config, path):
+def run_config(config, path, on_miner_ready=None):
     from TwitchChannelPointsMiner import TwitchChannelPointsMiner
     from TwitchChannelPointsMiner.classes.Settings import Settings
 
@@ -254,6 +254,11 @@ def run_config(config, path):
     miner = TwitchChannelPointsMiner(**config.MINER_CONFIG)
     if config.ANALYTICS_CONFIG is not None:
         miner.analytics(**config.ANALYTICS_CONFIG)
+    if on_miner_ready is not None:
+        # Lets a caller running this off the main thread (e.g. the Windows
+        # shell, which can't rely on SIGINT/SIGTERM) reach this miner later
+        # to request a graceful shutdown - see TwitchChannelPointsMiner.end().
+        on_miner_ready(miner)
     interval = max(float(os.environ.get("TCPM_CONFIG_RELOAD_SECONDS", "5")), 1)
     watcher = threading.Thread(
         target=_watch_config,
@@ -306,7 +311,7 @@ def _create_default_config(config_path, template=None):
         pass
 
 
-def main(argv=None):
+def main(argv=None, on_miner_ready=None):
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config-dir",
@@ -358,7 +363,7 @@ def main(argv=None):
 
     if args.convert_only:
         return 0
-    run_config(config or _load_config(config_path), config_path)
+    run_config(config or _load_config(config_path), config_path, on_miner_ready)
     return 0
 
 

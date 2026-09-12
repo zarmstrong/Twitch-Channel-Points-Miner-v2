@@ -1,3 +1,22 @@
+// When this page is embedded in the Windows desktop shell's Dashboard tab
+// (an iframe on a different origin than the shell's own synthetic page), a
+// target="_blank" link can't open a normal browser tab the way it does when
+// this page is loaded directly - pywebview just shows a blank native popup
+// window instead. Route those clicks up to the shell (see its `message`
+// listener in windows_shell.html) to open in the user's real browser
+// instead. A real browser tab has `window.self === window.top` and this is
+// a no-op there, so external links keep working exactly as before.
+if (window.self !== window.top) {
+    document.addEventListener('click', function (event) {
+        var link = event.target.closest && event.target.closest('a[target="_blank"]');
+        if (!link) return;
+        var href = link.getAttribute('href') || '';
+        if (href.indexOf('http://') !== 0 && href.indexOf('https://') !== 0) return;
+        event.preventDefault();
+        window.top.postMessage({ type: 'shell-open-external', url: link.href }, '*');
+    });
+}
+
 // ApexCharts uses "MM" for months; the logger date format uses "mm".
 function toApexDateFormat(format) {
     return format.replace(/mm/g, 'MM');
@@ -112,7 +131,67 @@ var analyticsDeleteInProgress = false;
 var pointsLoaded = false;
 var dropsLoaded = false;
 var configLoaded = false;
+var logsLoaded = false;
 var webConfigState = null;
+
+// Variable to keep track of whether auto-update log is active
+var autoUpdateLog = true;
+
+// Variable to keep track of the last received log index
+var lastReceivedLogIndex = 0;
+var initialLogTailBytes = 128 * 1024;
+// The markup's initial #log-content text is only a placeholder shown before
+// the first real response arrives - cleared on that first response instead
+// of staying glued above the real tail forever.
+var logPlaceholderCleared = false;
+// Every poll used to append a brand-new text node with no upper bound, so a
+// long-running session (this tab keeps polling in the background even when
+// not the active one) accumulated the whole log's worth of DOM text nodes -
+// megabytes of retained content and, on Chromium/WebView2, gigabytes of
+// process memory after several hours. Keeping only the tail bounds it the
+// same way the server already bounds a single response (MAX_LOG_TAIL_BYTES).
+var logText = '';
+var LOG_DISPLAY_MAX_CHARS = 1024 * 1024;
+
+// Load a recent tail first, then request only entries appended after it.
+// Lazily started the first time the Logs tab is opened, then keeps polling
+// in the background (like the Drops/Now Watching refreshes) until paused.
+function getLog() {
+    $.get(`/log?lastIndex=${lastReceivedLogIndex}&tailBytes=${initialLogTailBytes}`).done(function (data, _status, xhr) {
+        if (!logPlaceholderCleared) {
+            logText = '';
+            logPlaceholderCleared = true;
+        }
+        // Logs contain Twitch-controlled text (for example prediction
+        // titles), so never interpret them as HTML - .text() sets it as a
+        // single text node rather than parsing markup.
+        logText += data;
+        if (logText.length > LOG_DISPLAY_MAX_CHARS) {
+            logText = logText.slice(logText.length - LOG_DISPLAY_MAX_CHARS);
+        }
+        $("#log-content").text(logText);
+        // Scroll to the bottom of the log content
+        $("#log-content").scrollTop($("#log-content")[0].scrollHeight);
+
+        // Update the last received log index
+        const nextPosition = Number(xhr.getResponseHeader("X-Log-Position"));
+        if (Number.isSafeInteger(nextPosition) && nextPosition >= 0) {
+            lastReceivedLogIndex = nextPosition;
+        }
+    }).always(function () {
+        // A rollover can briefly replace the active log between polls.
+        // Retry transient failures without advancing the byte position.
+        if (autoUpdateLog) {
+            setTimeout(getLog, logPollInterval);
+        }
+    });
+}
+
+function startLogPolling() {
+    if (logsLoaded) return;
+    logsLoaded = true;
+    getLog();
+}
 
 function showAnalyticsLoadError(message, details) {
     console.error(`[analytics] ${message}`, details || '');
@@ -129,17 +208,21 @@ function switchDashboardTab(tabName) {
     var isPoints = tabName === 'points';
     var isDrops = tabName === 'drops';
     var isConfig = tabName === 'config';
+    var isLogs = tabName === 'logs';
     $('#points-panel').toggle(isPoints);
     $('#drops-panel').toggle(isDrops);
     $('#config-panel').toggle(isConfig);
+    $('#logs-panel').toggle(isLogs);
 
     $('#tab-points').toggleClass('is-link', isPoints);
     $('#tab-drops').toggleClass('is-link', isDrops);
     $('#tab-config').toggleClass('is-link', isConfig);
+    $('#tab-logs').toggleClass('is-link', isLogs);
 
-    localStorage.setItem('dashboardTab', tabName);
+    safeStorage.setItem('dashboardTab', tabName);
 
     if (isConfig && !configLoaded) loadWebConfig();
+    if (isLogs && !logsLoaded) startLogPolling();
 
     // ApexCharts cannot reliably place annotations while its panel is hidden.
     // Reapply them after Points becomes visible, including when the page was
@@ -157,36 +240,24 @@ startDate.setDate(startDate.getDate() - daysAgo);
 var endDate = new Date();
 
 $(document).ready(function () {
-    var savedDarkMode = localStorage.getItem('dark-mode');
+    var savedDarkMode = safeStorage.getItem('dark-mode');
     if (savedDarkMode === null) {
         savedDarkMode = 'true';
-        localStorage.setItem('dark-mode', savedDarkMode);
+        safeStorage.setItem('dark-mode', savedDarkMode);
     }
     $('#dark-mode').prop('checked', savedDarkMode === 'true');
     $('#dark-theme').prop('disabled', savedDarkMode !== 'true');
 
-    var savedDashboardTab = localStorage.getItem('dashboardTab') || 'points';
-    dropsFilter = localStorage.getItem('dropsFilter') || 'active';
-    $('#drops-filter').val(dropsFilter);
-
-    // Keep one preference for both the checkbox and panel. New users start with
-    // the log hidden; retain the old key only as a one-time migration path.
-    var savedLogPreference = localStorage.getItem('logCheckboxState');
-    if (savedLogPreference === null) {
-        savedLogPreference = localStorage.getItem('log-enabled') || 'false';
-        localStorage.setItem('logCheckboxState', savedLogPreference);
+    var savedDashboardTab = safeStorage.getItem('dashboardTab') || 'points';
+    // A caller embedding this page (e.g. the Windows desktop shell's first-run
+    // Config view) can force the initial tab via a URL hash, bypassing
+    // whatever was last saved for this browser profile.
+    var requestedTab = (window.location.hash || '').replace('#', '');
+    if (['points', 'drops', 'config', 'logs'].includes(requestedTab)) {
+        savedDashboardTab = requestedTab;
     }
-    var isLogCheckboxChecked = savedLogPreference === 'true';
-    $('#log').prop('checked', isLogCheckboxChecked);
-    $('#log-box').toggle(isLogCheckboxChecked);
-    $('#auto-update-log').toggle(isLogCheckboxChecked);
-
-    // Variable to keep track of whether auto-update log is active
-    var autoUpdateLog = true;
-
-    // Variable to keep track of the last received log index
-    var lastReceivedLogIndex = 0;
-    var initialLogTailBytes = 128 * 1024;
+    dropsFilter = safeStorage.getItem('dropsFilter') || 'active';
+    $('#drops-filter').val(dropsFilter);
 
     $('#auto-update-log').click(() => {
         autoUpdateLog = !autoUpdateLog;
@@ -197,50 +268,8 @@ $(document).ready(function () {
         }
     });
 
-    $('#log').change(function () {
-        isLogCheckboxChecked = $(this).prop('checked');
-        localStorage.setItem('logCheckboxState', isLogCheckboxChecked);
-        $('#log-box').toggle(isLogCheckboxChecked);
-        $('#auto-update-log').toggle(isLogCheckboxChecked);
-
-        if (isLogCheckboxChecked) {
-            getLog();
-            $('html, body').scrollTop($(document).height());
-        }
-    });
-
-    if (isLogCheckboxChecked) {
-        getLog();
-    }
-
-    // Load a recent tail first, then request only entries appended after it.
-    function getLog() {
-        if (isLogCheckboxChecked) {
-            $.get(`/log?lastIndex=${lastReceivedLogIndex}&tailBytes=${initialLogTailBytes}`).done(function (data, _status, xhr) {
-                // Process and display the new log entries received
-                // Logs contain Twitch-controlled text (for example prediction
-                // titles), so never interpret them as HTML.
-                $("#log-content").append(document.createTextNode(data));
-                // Scroll to the bottom of the log content
-                $("#log-content").scrollTop($("#log-content")[0].scrollHeight);
-
-                // Update the last received log index
-                const nextPosition = Number(xhr.getResponseHeader("X-Log-Position"));
-                if (Number.isSafeInteger(nextPosition) && nextPosition >= 0) {
-                    lastReceivedLogIndex = nextPosition;
-                }
-            }).always(function () {
-                // A rollover can briefly replace the active log between polls.
-                // Retry transient failures without advancing the byte position.
-                if (autoUpdateLog && isLogCheckboxChecked) {
-                    setTimeout(getLog, logPollInterval);
-                }
-            });
-        }
-    }
-
     // Retrieve the saved header visibility preference from localStorage
-    var headerVisibility = localStorage.getItem('headerVisibility');
+    var headerVisibility = safeStorage.getItem('headerVisibility');
 
     // Set the initial header visibility based on the saved preference or default to 'visible'
     if (headerVisibility === 'hidden') {
@@ -259,12 +288,12 @@ $(document).ready(function () {
             $('#header').show();
             $('body').removeClass('header-hidden');
             // Save the header visibility preference as 'visible' in localStorage
-            localStorage.setItem('headerVisibility', 'visible');
+            safeStorage.setItem('headerVisibility', 'visible');
         } else {
             $('#header').hide();
             $('body').addClass('header-hidden');
             // Save the header visibility preference as 'hidden' in localStorage
-            localStorage.setItem('headerVisibility', 'hidden');
+            safeStorage.setItem('headerVisibility', 'hidden');
         }
     });
 
@@ -275,23 +304,23 @@ $(document).ready(function () {
         switchDashboardTab(savedDashboardTab);
     });
 
-    if (!localStorage.getItem("annotations")) localStorage.setItem("annotations", true);
-    if (!localStorage.getItem("sort-by")) localStorage.setItem("sort-by", "Name ascending");
+    if (!safeStorage.getItem("annotations")) safeStorage.setItem("annotations", true);
+    if (!safeStorage.getItem("sort-by")) safeStorage.setItem("sort-by", "Name ascending");
 
     // Restore settings from localStorage on page load
-    $('#annotations').prop("checked", localStorage.getItem("annotations") === "true");
+    $('#annotations').prop("checked", safeStorage.getItem("annotations") === "true");
 
     // Handle the annotation toggle click event
     $('#annotations').click(() => {
         var isChecked = $('#annotations').prop("checked");
-        localStorage.setItem("annotations", isChecked);
+        safeStorage.setItem("annotations", isChecked);
         updateAnnotations();
     });
 
     // Handle the dark mode toggle click event
     $('#dark-mode').click(() => {
         var isChecked = $('#dark-mode').prop("checked");
-        localStorage.setItem("dark-mode", isChecked);
+        safeStorage.setItem("dark-mode", isChecked);
         toggleDarkMode();
     });
 
@@ -306,6 +335,18 @@ $(document).ready(function () {
     $('#analytics-delete-modal-confirm').click(confirmStreamerAnalyticsDeletion);
     $('#analytics-delete-modal').click(function (event) {
         if (event.target === this) closeAnalyticsDeleteModal();
+    });
+    $('#confirm-modal-cancel').click(closeConfirmDialog);
+    $('#confirm-modal-confirm').click(function () {
+        var callback = confirmDialogCallback;
+        closeConfirmDialog();
+        if (callback) callback();
+    });
+    $('#confirm-modal').click(function (event) {
+        if (event.target === this) closeConfirmDialog();
+    });
+    $(document).on('keydown', function (event) {
+        if (event.key === 'Escape' && $('#confirm-modal').hasClass('is-active')) closeConfirmDialog();
     });
     $('#add-streamer-form').submit(function (event) {
         event.preventDefault();
@@ -325,7 +366,7 @@ $(document).ready(function () {
         if (event.key === 'Escape') closeAnalyticsDeleteModal();
     });
 
-    sortBy = localStorage.getItem("sort-by");
+    sortBy = safeStorage.getItem("sort-by");
     if (sortBy.includes("Points")) sortField = 'points';
     else if (sortBy.includes("Last activity")) sortField = 'last_activity';
     else sortField = 'name';
@@ -379,7 +420,7 @@ function changeStreamer(streamer, index) {
         currentStreamer = null;
         pointSeries = [];
         annotations = [];
-        localStorage.removeItem("selectedStreamer");
+        safeStorage.removeItem("selectedStreamer");
         updateStreamerDeleteControls();
         options.title.text = 'Channel points (dates are displayed in UTC)';
         renderPointsChart();
@@ -398,7 +439,7 @@ function changeStreamer(streamer, index) {
     }
 
     // Save the selected streamer in localStorage
-    localStorage.setItem("selectedStreamer", currentStreamer);
+    safeStorage.setItem("selectedStreamer", currentStreamer);
 
     getStreamerData(streamer);
 }
@@ -453,15 +494,15 @@ function getStreamers() {
         if (streamersList.length === 0) streamerDeleteSelectionMode = false;
 
         // Restore the selected streamer from localStorage on page load
-        var selectedStreamer = localStorage.getItem("selectedStreamer");
+        var selectedStreamer = safeStorage.getItem("selectedStreamer");
 
         if (selectedStreamer && streamersList.some(streamer => streamer.name === selectedStreamer)) {
             currentStreamer = selectedStreamer;
         } else {
             // If no selected streamer is found, default to the first streamer in the list
             currentStreamer = streamersList.length > 0 ? streamersList[0].name : null;
-            if (currentStreamer) localStorage.setItem("selectedStreamer", currentStreamer);
-            else localStorage.removeItem("selectedStreamer");
+            if (currentStreamer) safeStorage.setItem("selectedStreamer", currentStreamer);
+            else safeStorage.removeItem("selectedStreamer");
         }
 
         // Ensure the selected streamer is still active and scrolled into view
@@ -479,7 +520,7 @@ function renderStreamers() {
     $("#streamers-list").empty();
     streamersList.forEach((streamer, index) => {
         var isActive = currentStreamer === streamer.name;
-        if (!isActive && localStorage.getItem("selectedStreamer") === null && index === 0) {
+        if (!isActive && safeStorage.getItem("selectedStreamer") === null && index === 0) {
             isActive = true;
             currentStreamer = streamer.name;
         }
@@ -600,6 +641,26 @@ function updateStreamerDeleteControls() {
     $('#streamer-selection-hint').toggle(streamerDeleteSelectionMode);
 }
 
+// Generic in-page replacement for window.confirm(), used for destructive
+// dashboard actions (e.g. removing a streamer/category). Browsers can block
+// or auto-dismiss repeated native confirm() popups, which silently breaks
+// these actions, so this renders an actual dialog in the page instead.
+var confirmDialogCallback = null;
+
+function showConfirmDialog(options) {
+    confirmDialogCallback = options.onConfirm;
+    $('#confirm-modal-title').text(options.title);
+    $('#confirm-modal-message').text(options.message);
+    $('#confirm-modal-confirm').text(options.confirmLabel || 'Remove');
+    $('#confirm-modal').addClass('is-active').attr('aria-hidden', 'false');
+    $('#confirm-modal-cancel').focus();
+}
+
+function closeConfirmDialog() {
+    confirmDialogCallback = null;
+    $('#confirm-modal').removeClass('is-active').attr('aria-hidden', 'true');
+}
+
 function closeAnalyticsDeleteModal() {
     if (analyticsDeleteInProgress) return;
 
@@ -647,7 +708,7 @@ function confirmStreamerAnalyticsDeletion() {
                 streamerRefreshTimeout = null;
             }
             streamerDataRequest++;
-            localStorage.removeItem("selectedStreamer");
+            safeStorage.removeItem("selectedStreamer");
             currentStreamer = null;
         }
 
@@ -684,7 +745,7 @@ function changeSortBy(option) {
     sortStreamers();
     renderStreamers();
     $('#sorting-by').text(sortBy);
-    localStorage.setItem("sort-by", sortBy);
+    safeStorage.setItem("sort-by", sortBy);
 }
 
 function updateAnnotations() {
@@ -749,7 +810,10 @@ function renderNowWatching(entries) {
             link.on('click', function (e) {
                 e.preventDefault();
                 switchDashboardTab('drops');
-                changeDropCategory(entry.game);
+                var matchedCategory = findDropCategoryForNowWatching(entry);
+                if (matchedCategory) {
+                    changeDropCategory(matchedCategory);
+                }
             });
             line.append(link);
         } else if (entry.reason === 'drops' || entry.reason === 'badge') {
@@ -970,7 +1034,7 @@ function getVisibleDropCategories() {
 function changeDropsFilter(value) {
     dropsFilter = value;
     dropsPage = 1;
-    localStorage.setItem('dropsFilter', value);
+    safeStorage.setItem('dropsFilter', value);
     renderDropCategoryList();
     renderDropRows();
 }
@@ -1018,10 +1082,40 @@ function normalizeDropsData(response) {
     };
 }
 
+function findDropCategoryForNowWatching(entry) {
+    if (!entry) return null;
+    var visibleCategories = getVisibleDropCategories();
+
+    // "Currently watching" reports the live stream's game (stream.game), while
+    // drop categories are keyed by the drop campaign's game (campaign.game).
+    // These are usually the same string, but come from two different Twitch
+    // API objects fetched at different times, so they can diverge (most
+    // commonly for wildcard/badge-sourced watches) - an exact match is tried
+    // first, then a case-insensitive one, before falling back to matching by
+    // streamer, which is reliable regardless of which "game" string diverged.
+    if (entry.game) {
+        if (visibleCategories.indexOf(entry.game) !== -1) {
+            return entry.game;
+        }
+        var lowerGame = entry.game.toLowerCase();
+        var caseInsensitiveMatch = visibleCategories.find((category) => category.toLowerCase() === lowerGame);
+        if (caseInsensitiveMatch) return caseInsensitiveMatch;
+    }
+
+    if (entry.username) {
+        var byStreamer = visibleCategories.find((category) => {
+            return (dropsState.categories[category] || []).some((drop) => drop.streamer === entry.username);
+        });
+        if (byStreamer) return byStreamer;
+    }
+
+    return null;
+}
+
 function changeDropCategory(category) {
     currentDropCategory = category;
     dropsPage = 1;
-    localStorage.setItem('selectedDropCategory', category);
+    safeStorage.setItem('selectedDropCategory', category);
     renderDropCategoryList();
     renderDropRows();
 }
@@ -1175,7 +1269,7 @@ function renderDropRows() {
 function renderDropsByCategory(response) {
     dropsState = normalizeDropsData(response);
 
-    var savedDropCategory = localStorage.getItem('selectedDropCategory');
+    var savedDropCategory = safeStorage.getItem('selectedDropCategory');
     if (savedDropCategory && dropsState.categories[savedDropCategory]) {
         currentDropCategory = savedDropCategory;
     }
@@ -1247,7 +1341,7 @@ function renderConfiguredStreamers(streamers) {
     if (!configuredStreamersSortable) {
         configuredStreamersSortable = makeSortable(container[0], function () {
             var reordered = $('#configured-streamers .config-streamer').map(function () {
-                return $(this).data('username');
+                return $(this).attr('data-username');
             }).get();
             updateWebConfig({ action: 'reorder_streamers', usernames: reordered }, 'Streamer order was updated.');
         });
@@ -1294,10 +1388,15 @@ function renderConfiguredStreamers(streamers) {
     });
     $('.save-streamer-settings').off('click').on('click', saveStreamerSettings);
     $('.remove-streamer').off('click').on('click', function () {
-        var username = $(this).closest('.config-streamer').data('username');
-        if (window.confirm(`Remove ${username} from the miner configuration?`)) {
-            updateWebConfig({ action: 'remove', kind: 'streamers', value: username }, `${username} was removed.`);
-        }
+        var username = $(this).closest('.config-streamer').attr('data-username');
+        showConfirmDialog({
+            title: 'Remove streamer?',
+            message: `Remove ${username} from the miner configuration?`,
+            confirmLabel: 'Remove',
+            onConfirm: function () {
+                updateWebConfig({ action: 'remove', kind: 'streamers', value: username }, `${username} was removed.`);
+            }
+        });
     });
     // Prevent a plain click (no drag) on the handle from toggling the
     // enclosing <details> row open/closed via its <summary> ancestor.
@@ -1331,9 +1430,14 @@ function renderConfiguredCategories(categories) {
     });
     $('.remove-category').off('click').on('click', function () {
         var category = $(this).closest('.config-category').find('.config-item-name').text();
-        if (window.confirm(`Remove ${category} from the miner configuration?`)) {
-            updateWebConfig({ action: 'remove', kind: 'categories', value: category }, `${category} was removed.`);
-        }
+        showConfirmDialog({
+            title: 'Remove category?',
+            message: `Remove ${category} from the miner configuration?`,
+            confirmLabel: 'Remove',
+            onConfirm: function () {
+                updateWebConfig({ action: 'remove', kind: 'categories', value: category }, `${category} was removed.`);
+            }
+        });
     });
 }
 
@@ -1463,7 +1567,7 @@ function saveStreamerSettings() {
         settings[$(this).data('setting')] = $(this).prop('checked');
     });
     settings.chat = item.find('[data-setting="chat"]').val();
-    var username = item.data('username');
+    var username = item.attr('data-username');
     updateWebConfig({ action: 'update_streamer', username: username, settings: settings }, `${username} settings were saved.`, button);
 }
 

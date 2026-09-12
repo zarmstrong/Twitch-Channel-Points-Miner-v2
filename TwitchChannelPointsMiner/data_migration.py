@@ -9,10 +9,15 @@ from pathlib import Path
 
 ANALYTICS_DATA_VERSION = 1
 
-# Rewritten wholesale every watch cycle, never durable user data, so it
-# carries no "version" field and is exempt from the versioned-JSON-object
-# migration below.
-UNVERSIONED_ANALYTICS_FILES = {"now_watching.json"}
+# Rewritten wholesale on every update (a watch cycle for now_watching.json,
+# any dashboard preference change for dashboard_prefs.json), never durable
+# per-streamer analytics data, so neither carries a "version" field and both
+# are exempt from the versioned-JSON-object migration below. Without this,
+# a file that's read-modified-written wholesale elsewhere loses whatever
+# "version" a migration attempt added the moment anything next changes it -
+# making every later launch see it as unmigrated again, hit the same
+# already-created backup file, and fail hard.
+UNVERSIONED_ANALYTICS_FILES = {"now_watching.json", "dashboard_prefs.json"}
 
 
 class DataMigrationError(ValueError):

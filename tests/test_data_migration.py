@@ -53,6 +53,29 @@ def test_migrate_analytics_directory_skips_now_watching_file(tmp_path):
     ]
 
 
+def test_migrate_analytics_directory_skips_dashboard_prefs_file(tmp_path):
+    # Reproduces a real crash: dashboard_prefs.json is rewritten wholesale
+    # (never carrying a "version" field) every time a dashboard preference
+    # changes - see AnalyticsServer.dashboard_prefs(). If this file were
+    # ever versioned, the very first migration would leave a
+    # dashboard_prefs.json.v0.bak backup behind; the next preference change
+    # then resets the live file back to "no version field" (a wholesale
+    # rewrite, not a migration), so the *next* launch would see it as
+    # unmigrated again, collide with that already-existing backup, and
+    # raise - stopping the app on every subsequent launch. Must be skipped
+    # entirely, the same as now_watching.json, regardless of how many times
+    # it's been rewritten or what backups already exist beside it.
+    prefs_file = tmp_path / "dashboard_prefs.json"
+    prefs_file.write_text(json.dumps({"dark-mode": "false"}), encoding="utf-8")
+    (tmp_path / "dashboard_prefs.json.v0.bak").write_text(
+        json.dumps({"dark-mode": "true"}), encoding="utf-8"
+    )
+
+    assert migrate_analytics_directory(tmp_path) == 0
+
+    assert json.loads(prefs_file.read_text(encoding="utf-8")) == {"dark-mode": "false"}
+
+
 def test_migrate_analytics_directory_rejects_future_versions(tmp_path):
     path = tmp_path / "channel.json"
     path.write_text(

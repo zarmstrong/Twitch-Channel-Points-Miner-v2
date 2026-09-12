@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import Lock, Thread
 
-from flask import Flask, Response, cli, render_template, request
+from flask import Flask, Response, cli, g, render_template, request
 
 from TwitchChannelPointsMiner import __version__
 from TwitchChannelPointsMiner.classes.Settings import ANALYTICS_FILE_MUTEX, Settings
@@ -25,6 +25,43 @@ logger = logging.getLogger(__name__)
 MAX_LOG_TAIL_BYTES = 1024 * 1024
 UPDATE_DISMISSAL_COOKIE = "tcpm_update_dismissed_version"
 RESPONSE_CACHE_TTL_SECONDS = 10.0
+
+# Set by windows_launcher.py, which runs the AnalyticsServer thread inside
+# the same process as its own trusted desktop shell - never by Docker or a
+# plain source checkout. Lets the shell's own embedded dashboard skip the
+# Basic Auth prompt without weakening it for anyone else: a browser opened
+# by anything other than that same process's launcher never has this token.
+SHELL_BYPASS_TOKEN_ENV_VAR = "TCPM_SHELL_ANALYTICS_TOKEN"
+SHELL_BYPASS_COOKIE = "tcpm_shell_token"
+
+# Set by windows_launcher.py from its bundled commit_hash.txt (see
+# build_windows.bat) before starting the miner thread - unset (and the
+# footer line below just omitted) for Docker or a plain source checkout,
+# which have no such build-time artifact to read.
+BUILD_COMMIT_ENV_VAR = "TCPM_BUILD_COMMIT"
+
+# charts.html's own display preferences (dark mode, annotations, header
+# visibility, ...) - normally just localStorage on the browser making the
+# request, which works fine for a real browser tab or the Docker deployment.
+# The Windows desktop shell embeds this same page in an iframe on a
+# different origin than its own synthetic top-level page though, and that
+# cross-origin embedding is exactly the case browsers restrict localStorage
+# in - so charts.html's safeStorage falls back to these server-persisted
+# copies there instead of losing them on every reload. An explicit allowlist
+# (not "whatever key/value the page sends") keeps this file from becoming an
+# arbitrary write target for anything that can reach this endpoint.
+DASHBOARD_PREFS_FILENAME = "dashboard_prefs.json"
+ALLOWED_DASHBOARD_PREF_KEYS = {
+    "dark-mode",
+    "annotations",
+    "headerVisibility",
+    "dropsFilter",
+    "sort-by",
+    "dashboardTab",
+    "selectedStreamer",
+    "selectedDropCategory",
+}
+MAX_DASHBOARD_PREF_VALUE_LENGTH = 256
 
 
 class TTLResponseCache:
@@ -126,7 +163,11 @@ def get_assets_folder():
 
 def streamers_available():
     path = Settings.analytics_path
-    excluded_files = {"drops_by_category.json", "now_watching.json"}
+    excluded_files = {
+        "drops_by_category.json",
+        "now_watching.json",
+        DASHBOARD_PREFS_FILENAME,
+    }
     available = [
         f
         for f in os.listdir(path)
@@ -396,6 +437,35 @@ def now_watching():
     return Response(payload, status=200, mimetype="application/json")
 
 
+def _dashboard_prefs_path():
+    # analytics_path is only ever set once analytics setup actually runs
+    # (TwitchChannelPointsMiner.__init__) - unset here means there's nowhere
+    # sane to read or write, not an error case callers need to handle
+    # separately.
+    analytics_path = getattr(Settings, "analytics_path", None)
+    if not analytics_path:
+        return None
+    return os.path.join(analytics_path, DASHBOARD_PREFS_FILENAME)
+
+
+def read_dashboard_prefs():
+    path = _dashboard_prefs_path()
+    if path is None:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        key: value
+        for key, value in data.items()
+        if key in ALLOWED_DASHBOARD_PREF_KEYS and isinstance(value, str)
+    }
+
+
 def index(refresh=5, days_ago=7, log_poll_interval=5):
     assets_folder = get_assets_folder()
     asset_version = max(
@@ -419,7 +489,62 @@ def index(refresh=5, days_ago=7, log_poll_interval=5):
             latest_version is not None and dismissed_version != latest_version
         ),
         updateDismissalCookie=UPDATE_DISMISSAL_COOKIE,
+        dashboardPrefs=read_dashboard_prefs(),
+        buildCommit=os.environ.get(BUILD_COMMIT_ENV_VAR),
     )
+
+
+def dashboard_prefs():
+    """Persist one charts.html display preference server-side - the
+    fallback safeStorage in charts.html uses when this page's own
+    localStorage is blocked (see the module-level comment on
+    ALLOWED_DASHBOARD_PREF_KEYS). `value: null` removes the key, matching
+    localStorage.removeItem's contract.
+    """
+    payload = request.get_json(silent=True) or {}
+    key = payload.get("key")
+    value = payload.get("value", "__missing__")
+    if key not in ALLOWED_DASHBOARD_PREF_KEYS or value == "__missing__":
+        return Response(
+            json.dumps({"error": "Unknown preference."}),
+            status=400,
+            mimetype="application/json",
+        )
+    if value is not None and (
+        not isinstance(value, str) or len(value) > MAX_DASHBOARD_PREF_VALUE_LENGTH
+    ):
+        return Response(
+            json.dumps({"error": "Invalid preference value."}),
+            status=400,
+            mimetype="application/json",
+        )
+
+    path = _dashboard_prefs_path()
+    if path is None:
+        # Analytics setup hasn't run yet (no analytics_path to write under) -
+        # nothing to persist to, but not worth failing the request over;
+        # charts.html's in-memory fallback still holds the value for the
+        # rest of this session.
+        return Response(json.dumps({}), status=200, mimetype="application/json")
+
+    with ANALYTICS_FILE_MUTEX:
+        prefs = read_dashboard_prefs()
+        if value is None:
+            prefs.pop(key, None)
+        else:
+            prefs[key] = value
+        try:
+            with open(path, "w", encoding="utf-8") as file:
+                json.dump(prefs, file)
+        except OSError as error:
+            logger.error("Unable to persist dashboard preferences: %s", error)
+            return Response(
+                json.dumps({"error": "Unable to save preference."}),
+                status=500,
+                mimetype="application/json",
+            )
+
+    return Response(json.dumps(prefs), status=200, mimetype="application/json")
 
 
 def streamers():
@@ -624,6 +749,7 @@ class AnalyticsServer(Thread):
         self.days_ago = days_ago
         self.username = username
         self.password = password
+        self.shell_bypass_token = os.environ.get(SHELL_BYPASS_TOKEN_ENV_VAR)
 
         if host not in {"127.0.0.1", "localhost", "::1"} and not password:
             raise ValueError("Analytics exposed beyond localhost requires a password")
@@ -686,6 +812,18 @@ class AnalyticsServer(Thread):
 
         @self.app.before_request
         def require_authentication():
+            if request.endpoint == "static":
+                # CSS/JS/images powering the UI itself, not account data -
+                # gating these behind auth has no security benefit and
+                # breaks any client that can't repeat credentials on every
+                # sub-resource request. A browser resends cached HTTP Basic
+                # credentials automatically, but the Windows shell's
+                # embedded iframe relies on a cookie set by the bypass-token
+                # check below, and that cookie doesn't reliably reach these
+                # same-origin requests there - leaving the page structure to
+                # load (its own request carries the token) while every
+                # style/script/image 401s and silently fails to apply.
+                return None
             if self.password is None:
                 if request.path.startswith("/config"):
                     return Response(
@@ -701,6 +839,22 @@ class AnalyticsServer(Thread):
                         mimetype="application/json",
                     )
                 return None
+            if self.shell_bypass_token:
+                cookie_token = request.cookies.get(SHELL_BYPASS_COOKIE)
+                if cookie_token and secrets.compare_digest(
+                    cookie_token, self.shell_bypass_token
+                ):
+                    return None
+                query_token = request.args.get("shell_token")
+                if query_token and secrets.compare_digest(
+                    query_token, self.shell_bypass_token
+                ):
+                    # The cookie above is what authenticates every later
+                    # same-origin request the dashboard's own JS makes (it
+                    # has no way to repeat this query param) - persisted via
+                    # the after_request hook below, once, right here.
+                    g.tcpm_set_shell_bypass_cookie = True
+                    return None
             authorization = request.authorization
             valid_username = authorization is not None and secrets.compare_digest(
                 authorization.username or "", self.username or ""
@@ -715,6 +869,17 @@ class AnalyticsServer(Thread):
                 status=401,
                 headers={"WWW-Authenticate": 'Basic realm="Twitch analytics"'},
             )
+
+        @self.app.after_request
+        def persist_shell_bypass_cookie(response):
+            if getattr(g, "tcpm_set_shell_bypass_cookie", False):
+                response.set_cookie(
+                    SHELL_BYPASS_COOKIE,
+                    self.shell_bypass_token,
+                    httponly=True,
+                    samesite="Lax",
+                )
+            return response
 
         self.app.add_url_rule(
             "/",
@@ -757,19 +922,46 @@ class AnalyticsServer(Thread):
             test_web_notification,
             methods=["POST"],
         )
+        self.app.add_url_rule(
+            "/dashboard_prefs",
+            "dashboard_prefs",
+            dashboard_prefs,
+            methods=["POST"],
+        )
 
     def run(self):
+        # Production WSGI server instead of Flask's development server.
+        # create_server() does the actual socket bind - split out from
+        # waitress.serve() (which does create_server(...).run() in one call)
+        # so a failed bind can be reported clearly instead of only showing up
+        # as an uncaught traceback in "Exception in thread Analytics Thread",
+        # and so the "running" log line below reflects a real success rather
+        # than merely an intent that might fail moments later.
+        from waitress.server import create_server
+
+        try:
+            server = create_server(
+                self.app,
+                host=self.host,
+                port=self.port,
+                threads=8,
+                ident=None,
+            )
+        except OSError as error:
+            logger.error(
+                f"Could not start the analytics dashboard on "
+                f"http://{self.host}:{self.port}/ ({error}). Another program "
+                "(or a previous copy of this app still running in the "
+                "background) is probably already using that port - close it, "
+                "or set a different 'port' under ANALYTICS_CONFIG in your "
+                "config file and restart. Mining will continue without the "
+                "dashboard.",
+                extra={"emoji": ":warning:"},
+            )
+            return
+
         logger.info(
             f"Analytics running on http://{self.host}:{self.port}/",
             extra={"emoji": ":globe_with_meridians:"},
         )
-        # Production WSGI server instead of Flask's development server.
-        from waitress import serve
-
-        serve(
-            self.app,
-            host=self.host,
-            port=self.port,
-            threads=8,
-            ident=None,
-        )
+        server.run()

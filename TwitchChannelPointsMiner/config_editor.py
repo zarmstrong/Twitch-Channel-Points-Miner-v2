@@ -717,6 +717,72 @@ def _write_streamers(config_path, records, updated_usernames=None):
     )
 
 
+def enable_analytics_dashboard(
+    config_path,
+    password,
+    host="127.0.0.1",
+    port=54455,
+    refresh=5,
+    days_ago=7,
+    log_poll_interval=5,
+):
+    """Turn on the analytics dashboard for an *existing* configuration.
+
+    Used for an explicit, in-the-moment user action - the Windows desktop
+    shell's one-time "enable the dashboard?" prompt, or its on-demand
+    "Enable dashboard" button, both in windows_launcher.py - rather than the
+    silent first-run bootstrap in that module's
+    ensure_windows_analytics_defaults(), which only ever touches a config it
+    just created from the template. Because this path is a deliberate user
+    choice, it goes through the same source-preserving AST edit machinery as
+    every other dashboard-driven config change, keeping the rest of the
+    user's file - formatting, comments, unrelated settings - untouched.
+
+    Leaves ANALYTICS_CONFIG alone if it is already a literal dict (the user
+    has existing analytics settings, just switched off - respect them
+    rather than overwriting host/port/password with fresh defaults); only
+    replaces it when it is still unset (e.g. `ANALYTICS_CONFIG = None`).
+    """
+    _set_dict_items(config_path, "MINER_CONFIG", {"enable_analytics": "True"})
+
+    source = Path(config_path).read_text(encoding="utf-8")
+    analytics_config_node = _assignment(ast.parse(source), "ANALYTICS_CONFIG")
+    if analytics_config_node is None:
+        raise ConfigEditError("ANALYTICS_CONFIG assignment not found in config.py.")
+    if isinstance(analytics_config_node, ast.Dict):
+        return
+
+    rendered = (
+        "{\n"
+        f"    'host': {host!r},\n"
+        f"    'port': {port},\n"
+        f"    'refresh': {refresh},\n"
+        f"    'days_ago': {days_ago},\n"
+        f"    'password': {password!r},\n"
+        f"    'log_poll_interval': {log_poll_interval},\n"
+        "}"
+    )
+    _replace_config_node(config_path, analytics_config_node, rendered)
+
+
+def set_miner_username(config_path, username):
+    """Set MINER_CONFIG['username'] - the Twitch account the miner logs in
+    as - on an existing configuration.
+
+    Used by the Windows desktop shell's first-run setup prompt (see
+    windows_launcher.py), shown when a config's username is still the
+    bundled template's placeholder. Twitch account usernames follow the
+    same character rules as a streamer username, so STREAMER_RE is reused
+    for validation. Writes through the normal AST edit path, preserving
+    the rest of the file untouched.
+    """
+    username = username.strip()
+    if not STREAMER_RE.fullmatch(username):
+        raise ConfigEditError("Enter a valid Twitch username.")
+    _set_dict_items(config_path, "MINER_CONFIG", {"username": repr(username)})
+    return username
+
+
 def _write_logger_settings(config_path, values):
     rendered = {
         name: (
@@ -902,13 +968,16 @@ def _update_managed_web_config(config_path, payload):
         kind = payload.get("kind")
         raw_value = payload.get("value")
         value = raw_value.strip() if isinstance(raw_value, str) else ""
-        valid = (
-            STREAMER_RE.fullmatch(value) is not None
-            if kind == "streamers"
-            else _valid_managed_category(value)
-            if kind == "categories"
-            else False
-        )
+        if action == "add":
+            valid = (
+                STREAMER_RE.fullmatch(value) is not None
+                if kind == "streamers"
+                else _valid_managed_category(value)
+                if kind == "categories"
+                else False
+            )
+        else:
+            valid = bool(value) and kind in {"streamers", "categories"}
         if not valid:
             raise ConfigEditError("Invalid streamer username or category value.")
         items = list(current[kind])

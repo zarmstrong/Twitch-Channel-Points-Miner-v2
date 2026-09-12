@@ -7,12 +7,16 @@ from types import SimpleNamespace
 
 from TwitchChannelPointsMiner.classes.AnalyticsServer import (
     AnalyticsServer,
+    BUILD_COMMIT_ENV_VAR,
     MAX_LOG_TAIL_BYTES,
+    SHELL_BYPASS_COOKIE,
+    SHELL_BYPASS_TOKEN_ENV_VAR,
     TTLResponseCache,
     UPDATE_DISMISSAL_COOKIE,
     bounded_log_start,
     filter_datas,
     get_streamer_summary,
+    read_dashboard_prefs,
     seek_log_start,
     streamers_available,
 )
@@ -110,6 +114,7 @@ def test_streamers_available_excludes_now_watching_file(monkeypatch, tmp_path):
     (tmp_path / "drops_by_category.json").write_text(
         '{"drops": []}', encoding="utf-8"
     )
+    (tmp_path / "dashboard_prefs.json").write_text("{}", encoding="utf-8")
 
     assert streamers_available() == ["example.json"]
 
@@ -265,6 +270,22 @@ def test_config_endpoints_require_analytics_authentication():
     assert "analytics username and password" in read_response.get_json()["error"]
 
 
+def test_static_assets_are_served_without_authentication():
+    # CSS/JS/images powering the UI, not account data - a browser resends
+    # cached Basic Auth credentials automatically for these, but the
+    # Windows shell's embedded iframe relies on a cookie that doesn't
+    # reliably reach same-origin sub-resource requests there, which
+    # previously left the page structure loading while every style, script,
+    # and image 401'd and silently failed to apply.
+    server = AnalyticsServer(username="user", password="secret")
+
+    response = server.app.test_client().get(
+        server.app.static_url_path + "/style.css"
+    )
+
+    assert response.status_code == 200
+
+
 def test_dashboard_shows_version_update_banner_and_footer(monkeypatch):
     monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
     monkeypatch.setattr(Settings, "latest_release_version", "3.8.0", raising=False)
@@ -288,6 +309,26 @@ def test_dashboard_shows_version_update_banner_and_footer(monkeypatch):
     assert "Tkd-Alex" in page
 
 
+def test_dashboard_footer_shows_build_commit_when_set(monkeypatch):
+    monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
+    monkeypatch.setenv(BUILD_COMMIT_ENV_VAR, "abc1234")
+    server = AnalyticsServer(password=None)
+
+    page = server.app.test_client().get("/").get_data(as_text=True)
+
+    assert "(abc1234)" in page
+
+
+def test_dashboard_footer_omits_build_commit_when_unset(monkeypatch):
+    monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
+    monkeypatch.delenv(BUILD_COMMIT_ENV_VAR, raising=False)
+    server = AnalyticsServer(password=None)
+
+    page = server.app.test_client().get("/").get_data(as_text=True)
+
+    assert "(" not in page.split("Running version", 1)[1].split(".", 1)[0]
+
+
 def test_dashboard_hides_banner_for_dismissed_version_but_keeps_footer(monkeypatch):
     monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
     monkeypatch.setattr(Settings, "latest_release_version", "3.8.0", raising=False)
@@ -300,6 +341,112 @@ def test_dashboard_hides_banner_for_dismissed_version_but_keeps_footer(monkeypat
 
     assert 'id="update-available-banner"' not in page
     assert "Upgrade available: 3.8.0" in page
+
+
+def test_index_embeds_saved_dashboard_prefs_in_page(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "dashboard_prefs.json").write_text(
+        '{"dark-mode": "false", "annotations": "true"}', encoding="utf-8"
+    )
+    server = AnalyticsServer(password=None)
+
+    page = server.app.test_client().get("/").get_data(as_text=True)
+
+    assert '"dark-mode": "false"' in page
+    assert '"annotations": "true"' in page
+
+
+def test_index_embeds_empty_prefs_when_none_saved_yet(monkeypatch):
+    monkeypatch.setattr(Settings, "logger", SimpleNamespace(date_format="dd/mm/yy"))
+    server = AnalyticsServer(password=None)
+
+    page = server.app.test_client().get("/").get_data(as_text=True)
+
+    assert "var serverDashboardPrefs = {}" in page
+
+
+def test_dashboard_prefs_endpoint_persists_a_new_value(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    response = client.post("/dashboard_prefs", json={"key": "dark-mode", "value": "false"})
+
+    assert response.status_code == 200
+    assert response.get_json() == {"dark-mode": "false"}
+    assert read_dashboard_prefs() == {"dark-mode": "false"}
+
+
+def test_dashboard_prefs_endpoint_removes_key_when_value_is_null(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "dashboard_prefs.json").write_text(
+        '{"dark-mode": "false", "annotations": "true"}', encoding="utf-8"
+    )
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    response = client.post("/dashboard_prefs", json={"key": "dark-mode", "value": None})
+
+    assert response.status_code == 200
+    assert response.get_json() == {"annotations": "true"}
+    assert read_dashboard_prefs() == {"annotations": "true"}
+
+
+def test_dashboard_prefs_endpoint_rejects_unknown_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    response = client.post(
+        "/dashboard_prefs", json={"key": "not-a-real-pref", "value": "x"}
+    )
+
+    assert response.status_code == 400
+    assert read_dashboard_prefs() == {}
+
+
+def test_dashboard_prefs_endpoint_rejects_oversized_value(tmp_path, monkeypatch):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    response = client.post(
+        "/dashboard_prefs", json={"key": "dark-mode", "value": "x" * 1000}
+    )
+
+    assert response.status_code == 400
+    assert read_dashboard_prefs() == {}
+
+
+def test_dashboard_prefs_endpoint_without_analytics_path_is_a_harmless_noop(
+    monkeypatch,
+):
+    monkeypatch.delattr(Settings, "analytics_path", raising=False)
+    server = AnalyticsServer(password=None)
+    client = server.app.test_client()
+
+    response = client.post("/dashboard_prefs", json={"key": "dark-mode", "value": "x"})
+
+    assert response.status_code == 200
+
+
+def test_read_dashboard_prefs_ignores_unexpected_keys_and_non_string_values(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    (tmp_path / "dashboard_prefs.json").write_text(
+        '{"dark-mode": "true", "not-allowed": "x", "annotations": 1}',
+        encoding="utf-8",
+    )
+
+    assert read_dashboard_prefs() == {"dark-mode": "true"}
+
+
+def test_read_dashboard_prefs_defaults_to_empty_without_analytics_path(monkeypatch):
+    monkeypatch.delattr(Settings, "analytics_path", raising=False)
+
+    assert read_dashboard_prefs() == {}
 
 
 def test_authenticated_config_writes_reach_the_endpoint(tmp_path, monkeypatch):
@@ -320,6 +467,59 @@ def test_authenticated_config_writes_reach_the_endpoint(tmp_path, monkeypatch):
     )
 
     assert response.status_code == 200
+
+
+def test_shell_bypass_token_query_param_authenticates_and_sets_cookie(tmp_path, monkeypatch):
+    # Simulates the Windows desktop shell's embedded dashboard iframe: it
+    # can't attach a custom Authorization header, so it authenticates once
+    # via a query param carrying a token only its own launcher process set.
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    monkeypatch.setenv(SHELL_BYPASS_TOKEN_ENV_VAR, "shell-secret")
+    server = AnalyticsServer(username="user", password="secret")
+    client = server.app.test_client()
+
+    response = client.get("/streamers?shell_token=shell-secret")
+
+    assert response.status_code == 200
+    assert response.headers.get_all("Set-Cookie")
+    assert f"{SHELL_BYPASS_COOKIE}=shell-secret" in response.headers["Set-Cookie"]
+
+
+def test_shell_bypass_cookie_alone_authenticates_later_requests(tmp_path, monkeypatch):
+    # The dashboard's own JS makes many same-origin fetch() calls that never
+    # repeat the query param - only the cookie set on the first navigation
+    # keeps those authenticated.
+    monkeypatch.setattr(Settings, "analytics_path", str(tmp_path), raising=False)
+    monkeypatch.setenv(SHELL_BYPASS_TOKEN_ENV_VAR, "shell-secret")
+    server = AnalyticsServer(username="user", password="secret")
+    client = server.app.test_client()
+    client.set_cookie(SHELL_BYPASS_COOKIE, "shell-secret")
+
+    response = client.get("/streamers")
+
+    assert response.status_code == 200
+
+
+def test_shell_bypass_wrong_token_still_requires_basic_auth(monkeypatch):
+    monkeypatch.setenv(SHELL_BYPASS_TOKEN_ENV_VAR, "shell-secret")
+    server = AnalyticsServer(username="user", password="secret")
+    client = server.app.test_client()
+
+    response = client.get("/streamers?shell_token=wrong-guess")
+
+    assert response.status_code == 401
+
+
+def test_shell_bypass_unset_never_authenticates_even_with_matching_query(monkeypatch):
+    # Docker and a plain source checkout never set this env var - a client
+    # guessing the query param name must gain nothing there.
+    monkeypatch.delenv(SHELL_BYPASS_TOKEN_ENV_VAR, raising=False)
+    server = AnalyticsServer(username="user", password="secret")
+    client = server.app.test_client()
+
+    response = client.get("/streamers?shell_token=anything")
+
+    assert response.status_code == 401
 
 
 def test_bounded_log_start_honors_smaller_initial_tail():
@@ -516,11 +716,27 @@ def test_now_watching_widget_jumps_to_drops_tab_on_click():
     )[0]
 
     assert "switchDashboardTab('drops');" in render_now_watching
-    assert "changeDropCategory(entry.game);" in render_now_watching
+    # The now-watching game (from the live stream) and drop categories (keyed
+    # by the drop campaign's game) can diverge, so the click resolves the
+    # actual category via findDropCategoryForNowWatching(...) rather than
+    # trusting entry.game directly.
+    assert "findDropCategoryForNowWatching(entry)" in render_now_watching
+    assert "if (matchedCategory) {" in render_now_watching
+    assert "changeDropCategory(matchedCategory);" in render_now_watching
     # A drops/badge entry with no known game (entry.game is null) must not
     # be wired to changeDropCategory(null), which would corrupt the saved
     # Drops-tab category selection.
     assert "&& entry.game)" in render_now_watching
+
+    assert "function findDropCategoryForNowWatching(entry)" in script
+    resolver = script.split("function findDropCategoryForNowWatching", 1)[1].split(
+        "function changeDropCategory", 1
+    )[0]
+    # Falls back to matching by streamer when the game strings don't line up,
+    # since drop records carry a reliable streamer field regardless of which
+    # "game" string diverged.
+    assert "drop.streamer === entry.username" in resolver
+    assert "return null;" in resolver
 
 
 def test_points_chart_translates_logger_month_token_for_apexcharts():
@@ -570,17 +786,40 @@ def test_analytics_external_blank_links_prevent_reverse_tabnabbing():
     assert all('rel="noopener noreferrer"' in link for link in blank_links)
 
 
-def test_log_panel_uses_one_preference_and_starts_hidden_for_new_users():
+def test_logs_tab_is_lazily_loaded_and_starts_hidden_for_new_users():
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "assets" / "charts.html").read_text(encoding="utf-8")
+    script = (root / "assets" / "script.js").read_text(encoding="utf-8")
+
+    assert 'id="tab-logs"' in template
+    assert 'id="logs-panel" style="display: none;"' in template
+    assert "id=\"log\"" not in template
+    assert "var logsLoaded = false;" in script
+
+    switch_tab = script.split("function switchDashboardTab", 1)[1].split(
+        "\nvar startDate", 1
+    )[0]
+    assert "$('#logs-panel').toggle(isLogs);" in switch_tab
+    assert "if (isLogs && !logsLoaded) startLogPolling();" in switch_tab
+
+    start_polling = script.split("function startLogPolling()", 1)[1].split(
+        "\nfunction showAnalyticsLoadError", 1
+    )[0]
+    assert "if (logsLoaded) return;" in start_polling
+    assert "logsLoaded = true;" in start_polling
+
+
+def test_url_hash_overrides_saved_dashboard_tab():
     script = (Path(__file__).resolve().parents[1] / "assets" / "script.js").read_text(
         encoding="utf-8"
     )
+    ready_fn = script.split("$(document).ready(function ()", 1)[1].split(
+        "$('#auto-update-log').click", 1
+    )[0]
 
-    assert script.count("$('#log').change(function ()") == 1
-    assert "localStorage.getItem('logCheckboxState')" in script
-    assert "localStorage.getItem('log-enabled') || 'false'" in script
-    assert "var isLogCheckboxChecked = savedLogPreference === 'true';" in script
-    assert "$('#log-box').toggle(isLogCheckboxChecked);" in script
-    assert "$('#auto-update-log').toggle(isLogCheckboxChecked);" in script
+    assert "window.location.hash" in ready_fn
+    assert "['points', 'drops', 'config', 'logs'].includes(requestedTab)" in ready_fn
+    assert "savedDashboardTab = requestedTab;" in ready_fn
 
 
 def test_log_polling_retries_after_transient_rollover_failure():
@@ -588,13 +827,13 @@ def test_log_polling_retries_after_transient_rollover_failure():
         Path(__file__).resolve().parents[1] / "assets" / "script.js"
     ).read_text(encoding="utf-8")
     get_log = script.split("function getLog()", 1)[1].split(
-        "// Retrieve the saved header visibility", 1
+        "\nfunction startLogPolling", 1
     )[0]
     retry = get_log.split(".always(function ()", 1)[1]
 
     assert ".done(function (data, _status, xhr)" in get_log
     assert "setTimeout(getLog, logPollInterval);" in retry
-    assert "autoUpdateLog && isLogCheckboxChecked" in retry
+    assert "autoUpdateLog" in retry
 
 
 def test_dark_theme_keeps_config_panel_headings_readable():

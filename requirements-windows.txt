@@ -1,0 +1,14 @@
+# Additional dependency for the Windows executable's desktop shell
+# (windows_launcher.py). Not needed by the Docker image or a plain source
+# checkout, which keep using requirements.txt.
+-r requirements.txt
+pywebview==5.3.2
+pystray==0.19.5
+# 10.4.0 (the version originally pinned here) has no prebuilt Windows wheel
+# for Python 3.14 and silently fails its from-source build - pip's overall
+# "Install build dependencies" step still reports success (a later
+# `pip install` in the same multi-line run overwrites $LASTEXITCODE), so
+# this produced a broken, partially-built Pillow with no compiled extension
+# rather than a loud failure. 11.3.0 is the first release with a cp314
+# Windows wheel.
+Pillow==11.3.0
